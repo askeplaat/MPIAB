@@ -74,6 +74,24 @@ int empty(int top, int home) {
   return !not_empty(top, home);
 }
 */
+
+
+void copy_job_to_node(job_type *job, node_type *node) {
+  node->job_type_of_job = job->type_of_job;
+  node->job_from_machine = job->from;
+  node->job_lb = job->lb;
+  node->job_ub = job->ub;
+}
+
+void copy_node_to_job(job_type *job, node_type *node) {
+  job->node = node;
+  job->type_of_job = node->job_type_of_job;
+  job->from = node->job_from_machine;
+  job->lb = node->job_lb;
+  job->ub = node->job_ub;
+}
+
+
 int empty_jobs(int home) {
 #ifdef GLOBAL_QUEUE
   int x = top[home][SELECT] < 1 && 
@@ -156,7 +174,6 @@ void do_work_queue(int i) {
   //    printf("enter workqueue lbub<%d:%d>  ab<%d:%d> wab<%d:%d> LIVENODE: %d global_done: %d ", 
   //	   root->lb, root->ub, root->a, root->b, root->wa, root->wb, live_node(root), global_done);
 
-
   int safety_counter = SAFETY_COUNTER_INIT;
 
   while (safety_counter-- > 0 && !global_done && live_node(root)) { 
@@ -168,8 +185,19 @@ void do_work_queue(int i) {
       add_to_queue(i, new_job(root, SELECT)); 
     }
 
+#ifdef MSGPASS
+    if (my_process_id == i) {
+      node_type *node = malloc(sizeof(nodetype));
+      MPI_Recv(node, sizeof(node_type), MPI_INT, i, 0, MPI_COMM_WORLD); // blocking recv, but that is appropriate
+      job_type *job = malloc(sizeof(job_type));
+      copy_node_to_job(job, node);
+      if (job) {
+	process_job(i, job);
+      }
+    }
+#else
     job = pull_job(i);
-     
+
     if (job) {
       //     lock_node(job->node);
       //        lock(&treemutex);
@@ -182,6 +210,7 @@ void do_work_queue(int i) {
       //      printf("STEAL target: %d\n", steal_target);
       flush_buffer(steal_target, i);
     } 
+#endif
     /*
     lock(&global_jobmutex); // check
     check_consistency_empty();
@@ -209,6 +238,7 @@ void do_work_queue(int i) {
 // schedule node at the remote job_queue that is its home machine
 // with job action t, and optional argument a
 // pass the continuation
+
 void schedule(int my_id, node_type *node, int type, int from, int lb, int ub) {
   if (node) {
     // send to remote machine
@@ -262,7 +292,7 @@ void push_job(int my_id, int home_machine, job_type *job) {
   if (empty_jobs(home_machine) && global_empty_machines > 0) {
     // I was empty, not anymore
     //    printf("M:%d is empty. decr global-empty %d\n", home_machine, global_empty_machines);
-    global_empty_machines--;
+    global_empty_machines--; this will not work. no globl counters anymore
     /*
 hmm. this is invoked when local_top is empty. but push now only works with buffer. so localtop sometimes says empty when there are nonempty buffers.  causing too many selects to be scheduled.
 so empty should first do a global flush before more jobs are scheduled. or take the remote buffer counts into account
@@ -275,7 +305,9 @@ dus globalemptymachines is te laag
   int jobt = job->type_of_job;
   //int jobt = SELECT;
 #ifdef MSGPASS
-  MPI_Send(data, count, type, dest, tag, comm);
+  // perhaps add some message combining/buffering to reduce communication overhead
+  copy_job_to_node(job, job->node); // yes this is strange
+  MPI_Send(job->node, sizeof(node_type), MPI_INT, home_machine, 0, MPI_COMM_WORLD);
 #else
 #ifdef GLOBAL_QUEUE
   queue[home_machine][++(top[home_machine][jobt])][jobt] = job;
@@ -289,12 +321,15 @@ dus globalemptymachines is te laag
   // fill local buffer with one new job
   local_buffer[my_id][home_machine][++buffer_top[my_id][home_machine]] = job;
 #endif
-#endif
+
   
 #ifdef LOCAL_LOCK
   unlock(&jobmutex[home_machine]); // push
 #else
   unlock(&global_jobmutex); // push
+#endif
+
+  // if MPI
 #endif
 
 #define PRINT_PUSHES
@@ -390,9 +425,11 @@ void check_job_consistency() {
 ** PULL JOB
 */
 
+// non-blocking 
 // home_machine is the id of the home_machine of the node
 job_type *pull_job(int home_machine) {
   //  printf("M:%d Pull   ", home_machine);
+
 
   //#ifdef LOCAL_LOCK
   lock(&jobmutex[home_machine]);  // pull

@@ -66,17 +66,21 @@ typedef struct node {
   int lb;
   int ub;
   //  node_type **children;
-  int *children_at; // array of number/id of machine that holds the child
-  int *live_children; // array of liveness boolean of my children
+  int children_at[TREE_WIDTH]; // array of number/id of machine that holds the child
+  int live_children[TREE_WIDTH]; // array of liveness boolean of my children
   int n_children;
   //  node_type *parent;
-  int parent; // mchine number that holds the parent;
+  int parent; // machine number that holds the parent;
   //  node_type *best_child;
   int best_child; // machine number that holds the best child;
   int maxormin;
   int depth;
   int path;
   //  pthread_mutex_t nodelock;
+  int job_type_of_job; // room for MPI msgs for data from the job
+  int job_from_machine;
+  int job_lb;
+  int job_ub;
 } nt;
 
 struct job {
@@ -96,6 +100,7 @@ typedef struct job job_type;
 
 extern node_type *root;
 extern int global_empty_machines;
+extern int my_process_id; // MPI machine rank
 #ifdef GLOBAL_QUEUE
 extern job_type *queue[N_MACHINES][N_JOBS][JOB_TYPES];
 extern int top[N_MACHINES][JOB_TYPES];

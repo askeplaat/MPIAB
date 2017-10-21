@@ -306,6 +306,11 @@ int main(int argc, char *argv[]) {
     global_unorderedness_seq_n[i] = 1;
   }
 
+#ifdef MSGPASS
+  MPI_Init(NULL, NULL);
+  MPI_Comm_rank(MPI_COMM_WORLD, &my_id);
+#endif
+
   int numWorkers = __cilkrts_get_nworkers();
   printf("CILK has %d worker threads\n", numWorkers);
 

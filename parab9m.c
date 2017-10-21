@@ -114,6 +114,7 @@ DOWNWARD:
 
  
 node_type *root = NULL;
+int my_process_id; // MPI rank
 #ifdef GLOBAL_QUEUE
 job_type *queue[N_MACHINES][N_JOBS][JOB_TYPES];
 int top[N_MACHINES][JOB_TYPES];
@@ -135,6 +136,7 @@ pthread_mutex_t donemutex = PTHREAD_MUTEX_INITIALIZER;
 pthread_mutex_t global_queues_mutex = PTHREAD_MUTEX_INITIALIZER;
 int n_par = 1;
 
+// all these will no longer work...
 int sum_global_selects = 0;
 int sum_global_leaf_eval = 0;
 int sum_global_updates = 0;
@@ -217,8 +219,10 @@ void do_select(int my_id, node_type *node) {
 	for (int p = flc; p < higest_child_in_par; p++) {
 	  if (node->live_children[p] && !seq(node)) {
 	    int child_path = 10 * node->path + p + 1;
-	    schedule(my_id, node->children_at[p], EXPAND, 
+moet hier node->children_at[p] gezet worden?
+	    schedule(my_id, of hier child_path... node->children_at[p] nee moet een node pointer zijn, EXPAND, 
 		     child_path, node->wa, node->wb); 
+ toch liever niet? node wordt remote pas gecreeerd, hier kunnen we hooguit de naam van de node geven, het pad, en dan wordt hij remote gemaakt
 	  } 
 	}
       }
@@ -234,6 +238,7 @@ void do_select(int my_id, node_type *node) {
 #define UPDATE_AFTER_CUTOFF
 #ifdef UPDATE_AFTER_CUTOFF
       if (node->parent) {
+do we need BESTCHILD anymore?
 	schedule(my_id, node->parent, BESTCHILD, node);
 	schedule(my_id, node->parent, UPDATE, {int from_me = node->board;}, lb, ub);
       }
@@ -265,12 +270,18 @@ En wat is de betekenis van de pointer die new_leaf opleverd als de nieuwe leaf
 // Add new children, schedule them for selection
 // Can this work? it references nodes (children) at other home machines
 // must find out if remote pointers is doen by new_leaf or by schedule
-node_type *do_expand(int parent_id, node_path, parent_wa, parent_wb) {
+node_type *do_expand(int parent_id, node_type *node, parent_wa, parent_wb) {
   node_type *node = lookup(node_path);
   if (!node) {
     // existing nodes are not created
     // exisitng nodes are traveersed, and then SELECT?
-    node = new_leaf(parent_id);
+    node = new_leaf(parent_id);  XXXXXXXX
+    dit kan niet zo. new_leaf bevat de board berekening, daar pas wordt bepaald op welke machine de node 
+      terechtkomt. Dus de new_leaf moet al voor verzending plaatsvinden, anders weet je niet aan wie je het moet verzenden. ok. simpel. dus new_leaf in de select voor de schedule zetten.
+
+      copieer je een node of alleen het pad (een pointer). aleen een pointer kan niet, want voor het reconstrueren van alle waarden heb je de node nodig, en die zit in een gegeugen elders.
+
+      dus toch de hele node oversturen (deep copy)
     //copy in wa wb bounds
     
     node->path = node_path;
