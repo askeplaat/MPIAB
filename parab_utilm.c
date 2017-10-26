@@ -81,12 +81,12 @@ int unlock_node(node_type *node) {
 
 #define MAXMININIT
 
-node_type *new_leaf(node_type *p) {
+node_type *new_leaf(node_type *p, int ch) {
   if (p && p->depth <= 0) {
     return NULL;
   }
   node_type *node = malloc(sizeof(node_type));
-  node->board = rand() % N_MACHINES;
+  node->board = my_id; //rand() % N_MACHINES;  // my_machine
   node->maxormin = p?opposite(p->maxormin):MAXNODE;
   node->wa = -INFTY;
   node->wb = INFTY;
@@ -98,15 +98,20 @@ node_type *new_leaf(node_type *p) {
   node->b = INFTY;
   node->lb = -INFTY;
   node->ub = INFTY;
+  node->from_child = -1; // I was scheduled by a child, whose parent I am, and that child was number xx, this is used in UPDATE, to record which children are open
+  node->my_child_number = ch; // child number of my parent that I am
   node->children =  NULL;
   node->n_children = 0;
   node->n_open_kids = TREE_WIDTH;
   for (int i= 0; i < TREE_WIDTH; i++) {
     node->open_child[i] = TRUE;
   }
-  node->parent_id = p;
+  node->max_of_closed_kids_ub = -INFTY;
+  node->min_of_closed_kids_lb = INFTY;
+  node->parent_machine = p->board;
+  node->parent_path = p->path;
   node->best_child = NULL;
-  node->path = 0;
+  node->path = 10 * parent->path + ch + 1;;
   if (p) {
     node->depth = p->depth - 1;
   }
@@ -229,6 +234,10 @@ void set_best_child(node_type *node) {
 
 int child_number(int p) {
   return p - (10*(p/10));
+}
+
+int where() {
+  return rand() % N_MACHINES;  // my_machine
 }
 
 void print_unorderedness() {

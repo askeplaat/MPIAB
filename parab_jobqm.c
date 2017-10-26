@@ -162,18 +162,6 @@ void start_processes(int n_proc) {
 
 void do_work_queue(int i) {
   int workerNum = __cilkrts_get_worker_number();
-  //  printf("My CILK worker number is %d. global_empty: %d\n", workerNum, global_empty_machines);
-  //  printf("M:%d. global_empty: %d, total_jobs: %d\n", i, global_empty_machines, total_jobs);
-
-  //  lock(&treemutex);
-
-  //  printf("M:%d. global_empty: %d, total_jobs: %d\n", i, global_empty_machines, total_jobs);
-
-  //  unlock(&treemutex);
-
-  //    printf("enter workqueue lbub<%d:%d>  ab<%d:%d> wab<%d:%d> LIVENODE: %d global_done: %d ", 
-  //	   root->lb, root->ub, root->a, root->b, root->wa, root->wb, live_node(root), global_done);
-
   int safety_counter = SAFETY_COUNTER_INIT;
 
   while (safety_counter-- > 0 && !global_done && live_node(root)) { 
@@ -187,12 +175,19 @@ void do_work_queue(int i) {
 
 #ifdef MSGPASS
     if (my_process_id == i) {
-      node_type *node = malloc(sizeof(nodetype));
-      MPI_Recv(node, sizeof(node_type), MPI_INT, i, 0, MPI_COMM_WORLD); // blocking recv, but that is appropriate
-      job_type *job = malloc(sizeof(job_type));
-      copy_node_to_job(job, node);
-      if (job) {
-	process_job(i, job);
+    MPI_Status status;
+    void *msg = malloc(max(sizeof(child_msg), sizeof(parent_msg)));
+      MPI_Recv(msg, sizeof(node_type), MPI_INT, MPI_ANY_SOURCE, MPI_ANY_TAG, MPI_COMM_WORLD, &status); // blocking recv, but that is appropriate
+
+      if (msg->msg_type == CREATE_CHILD_AT) {
+	do_expand((child_msg *)msg);
+      } else if (msg->msg_type == UPDATE_PARENT_AT) {
+        do_update((update_msg *)msg);
+      } else if (msg->msg_type == UPDATE_CHILD_AT) {
+        downward_update_children((update_msg *)msg);
+      } else {
+	printf("ERROR: Wrong MPI message type\n");
+        exit(0);
       }
     }
 #else
@@ -234,18 +229,94 @@ void do_work_queue(int i) {
 }
 
 
+void create_child_at(node_type *node, int child_number) {
+  child_msg->msg_type = CREATE_CHILD_AT;
+  int home_machine = where(node);
+  node->children_at[child_number] = home_machine;
+  child_msg->child_number = child_number;
+  child_msg->path = node->path + childnumber;
+  child_msg->wa = node->wa;
+  child_msg->wb = node->wb;
+  child_msg->depth = node->depth - 1;
+  child_msg->parent_at = my_id;
+
+  // the idea to only send the pointer, not the full node.
+  MPI_Send(child_msg, sizeof(child_msg), MPI_BYTE, home_machine, 0, MPI_COMM_WORLD);
+  // receiver must store parent-at, and copy wa wb
+}
+
+void update_parent_at(node_type *node, int from_child_id) {
+  update_msg->msg_type = UPDATE_PARENT_AT;
+  int home_machine = node->parent_machine;
+  update_msg->from_child = from_child_id;
+  update_msg->lb = node->lb;
+  update_msg->ub = node->ub;
+  update_path->path = chop_child(node->path);
+
+  MPI_Send(update_msg, sizeof(update_msg), MPI_BYTE, home_machine, 0, MPI_COMM_WORLD);
+}
+
+void update_child_at(node_type *node, int p) {
+  update_msg->msg_type = UPDATE_CHILD_AT;
+  int home_machine = node->children_at[p];
+  //  update_msg->from_child = from_child_id;
+  update_msg->a = node->a;
+  update_msg->b = node->b;
+  update_msg->path = node->path + p;
+
+  MPI_Send(update_msg, sizeof(update_msg), MPI_BYTE, home_machine, 0, MPI_COMM_WORLD);
+}
+
+
 
 // schedule node at the remote job_queue that is its home machine
 // with job action t, and optional argument a
 // pass the continuation
 
-void schedule(int my_id, node_type *node, int type, int from, int lb, int ub) {
+void schedule(int my_id, node_type *node or parent machine???, int type, int from_child, int lb, int ub) {
+  /*
+  how does the parent machine find the node to work on, how does it find the pointer? does it do a TT lookup? with the path? does it need to be passed in the path of the node?
+												   
+axually, we do not want to start shipping whole nodes accross the network. can't we just ship pointers to the nodes? only the path's?
+		 we do ship whole nodes in select, where it creates all the children, who are then shiped to their desinations
+but for updating parents we want to update them in place at the destination.
+it is not a create but a reference
+
+  so we can do remote create, where the creates are done based on path
+  so then *node (second argument) must be node_path
+
+  put path formula for treewidth > 9 does not work, because 11 and 1 1 are indistinguishable
+   make a string, a dotted notation, or an array of ints indicating the node id???
+array of ints is easiest
+
+doing remote update
+and remote create
+both based on path
+				     but remote create needs parent, bounds, a/b
+				     yes, let's list what arguments remote create needs,
+and what arguments remote update needs. Any other operation's?
+
+
+ remote create-child-at: path, parent-depth, parent-at, parent_wa, parent_wb //child number(in path), parent in path
+ remote update-parent-at: path, lb_from_child, ub_from_child, from_child_id
+
+
+issuetje: new_leaf bevat de board berekening, waar pas bepaalt wordt op welke machine de node 
+geplaatst gaat worden. dus dat moet door de aanroeper plaatsvindne, want anders weet je niet naar welke machien je hem moet sturen.
+of we moeten de board berekening uit de new_leaf halen. dat kan natuurlijk best. Dan kun je hem welk remote createn. de arme new_leaf zonder de board berekening blijft over en gaat remote, er 
+moet een where() fundtie gemaakt worden die locaal de bestemming van de node bepaalt, en
+dan dat meesturen aan de schedule, die hem dan daar heen stuurt
+
+
+  */
+
   if (node) {
     // send to remote machine
     int home_machine = node->board;
-
+    node->from_child = from_child;
     int was_empty = empty_jobs(home_machine);  
-    add_to_queue(my_id, new_job(node, type, from, lb, ub));
+    add_to_queue(my_id, new_job(node, type, lb, ub));
+what is from?
     /*
     if (was_empty) {
       //      printf("Signalling machine %d for path %d type:[%d]. in wait: %d\n", home_machine, node->path, t, global_in_wait);
@@ -258,6 +329,7 @@ void schedule(int my_id, node_type *node, int type, int from, int lb, int ub) {
 
 // which q? one per processor
 void add_to_queue(int my_id, job_type *job) {
+  to schedule parent (update) home machine must be calculated. do it differently? pass in the parent machine?
   int home_machine = job->node->board;
   int jobt = job->type_of_job;
   if (home_machine >= N_MACHINES) {
@@ -602,7 +674,7 @@ void process_job(int my_id, job_type *job) {
     switch (job->type_of_job) {
     case SELECT:      do_select(my_id, job->node);  break;
     case PLAYOUT:     do_playout(my_id, job->node); break;
-    case UPDATE:      do_update(my_id, job->node);  break;
+    case UPDATE:      do_update(my_id, job->node, job->from_child, job->lb, job->ub);  break;
     case BOUND_DOWN:  do_bound_down(my_id, job->node);  break;
     otherwise: printf("ERROR: invalid job  type in q\n"); exit(0); break;
     }

@@ -43,6 +43,9 @@
 #define UL_OPEN_INFTY
 #define NWS_ON
 
+#define CREATE_CHILD_AT 0
+#define UPDATE_PARENT_AT 1
+
 // use Parallel Unorderedness to determine how much parallelism there should be scheduled
 #undef PUO
 #define LOCKS
@@ -66,16 +69,17 @@ typedef struct node {
   int lb;
   int ub;
   //  node_type **children;
+  int from_child; // I am the parent of a child, and that child scheduled me. which child was that?
   int children_at[TREE_WIDTH]; // array of number/id of machine that holds the child
   int live_children[TREE_WIDTH]; // array of liveness boolean of my children
   int n_children;
   //  node_type *parent;
-  int parent; // machine number that holds the parent;
+  int parent_at; // machine number that holds the parent;
   //  node_type *best_child;
-  int best_child; // machine number that holds the best child;
+  //  int best_child; // machine number that holds the best child;
   int maxormin;
   int depth;
-  int path;
+  int path[TREE_DEPTH];
   //  pthread_mutex_t nodelock;
   int job_type_of_job; // room for MPI msgs for data from the job
   int job_from_machine;
