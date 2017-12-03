@@ -1,12 +1,15 @@
 #include <stdio.h>         // for print
 #include <stdlib.h>        // for rand
-#include <cilk/cilk.h>     // for spawn and sync
-#include <cilk/cilk_api.h> // for cilk workers report
+//#include <cilk/cilk.h>     // for spawn and sync
+//#include <cilk/cilk_api.h> // for cilk workers report
+#include <mpi.h>
 #include <assert.h>        // for print
-#include <pthread.h>       // for mutex locks
+//#include <pthread.h>       // for mutex locks
 #include <string.h>        // for strcmp in main()
-#include "parab.h"         // for prototypes and data structures
+#include "parabm.h"         // for prototypes and data structures
 
+
+int global_empty_machines = N_MACHINES;
 
 /*******************************
  **** JOB Q                  ***
@@ -19,6 +22,7 @@
 // in effect a breadth first policy. not very efficient)
 // par should be near leaves. not near root
 int seq(node_type *node) {
+  return FALSE;
 #ifdef PUO
   return puo(node);
 #endif
@@ -31,7 +35,7 @@ int seq(node_type *node) {
 #ifdef GLOBAL_QUEUE
   return top[machine][SELECT] * 4 > N_JOBS || depth > SEQ_DEPTH;
 #else
-  return local_top[machine] * 4 > N_JOBS || depth > SEQ_DEPTH;
+  //  return local_top[machine] * 4 > N_JOBS || depth > SEQ_DEPTH;
 #endif
 }
 
@@ -47,10 +51,10 @@ double suo(int d) {
 // true if current child number is larger than sequential unorderedness.
 // this prevents parallelism beyond where the sequential algorithm would venture
 int puo(node_type *node) {
-  return child_number(node->path) > suo(node->depth);
+  return child_number(node) > suo(node->depth);
 }
 
-
+#ifndef MSGPASS
 int empty_buffers(int home) {
   for (int i = 0; i < N_MACHINES; i++) {
     if (buffer_top[i][home] > 0) {
@@ -59,6 +63,7 @@ int empty_buffers(int home) {
   }
   return TRUE;
 }
+#endif
 
 /*
 int not_empty(int top, int home) {
@@ -75,7 +80,7 @@ int empty(int top, int home) {
 }
 */
 
-
+/*
 void copy_job_to_node(job_type *job, node_type *node) {
   node->job_type_of_job = job->type_of_job;
   node->job_from_machine = job->from;
@@ -90,8 +95,8 @@ void copy_node_to_job(job_type *job, node_type *node) {
   job->lb = node->job_lb;
   job->ub = node->job_ub;
 }
-
-
+*/
+#ifndef MSGPASS
 int empty_jobs(int home) {
 #ifdef GLOBAL_QUEUE
   int x = top[home][SELECT] < 1 && 
@@ -106,7 +111,7 @@ int empty_jobs(int home) {
 #endif
   return x;
 }
-
+#endif
 // this should be atomic over all job queues. needs global lock, over all queues
 /*
 int no_more_jobs_in_system(int home) {
@@ -151,66 +156,159 @@ void start_processes(int n_proc) {
   //  for (i = 0; i<n_proc; i++) {
 
   global_done = FALSE;
-
+#ifdef MSGPASS
+  MPI_Comm_rank(MPI_COMM_WORLD, &my_process_id);
+  do_work_queue(my_process_id);
+#else
   for (i = 0; i<N_MACHINES; i++) {
     cilk_spawn do_work_queue(i);
   }
   //  printf("M:%d. Before Cilk sync\n", i);
   cilk_sync;
   //  printf("Root is solved. jobs: %d. root: <%d:%d> [%d:%d]\n", total_jobs, root->a, root->b, root->lb, root->ub);
+#endif
 }
 
-void do_work_queue(int i) {
-  int workerNum = __cilkrts_get_worker_number();
-  int safety_counter = SAFETY_COUNTER_INIT;
-
-  while (safety_counter-- > 0 && !global_done && live_node(root)) { 
-    job_type *job = NULL;
-
-    //    printf("globalempty machines: %d\n", global_empty_machines);
-    if (i == root->board && global_empty_machines >= N_MACHINES) {
-      //     printf("* globalempty machines: %d\n", global_empty_machines);
-      add_to_queue(i, new_job(root, SELECT)); 
+void do_idle_machine(int from) {
+  if (from < 0 || from >= world_size) {
+    printf("ERROR: bad machine number in do idle machine: %d\n", from);
+  }
+  printf("IDLE %d\n", from);
+  int old = global_no_jobs[from] == FALSE;
+  int new = global_no_jobs[from] = TRUE;
+  if (old == FALSE && new == TRUE) {
+    global_empty_machines ++;
+    if (global_empty_machines >= world_size) {
+      printf("ERROR: global_empty_machines too large: %d\n", global_empty_machines);
     }
+  }
+}
 
-#ifdef MSGPASS
-    if (my_process_id == i) {
-    MPI_Status status;
-    void *msg = malloc(max(sizeof(child_msg), sizeof(parent_msg)));
-      MPI_Recv(msg, sizeof(node_type), MPI_INT, MPI_ANY_SOURCE, MPI_ANY_TAG, MPI_COMM_WORLD, &status); // blocking recv, but that is appropriate
+void do_nonidle_machine(int from) {
+  if (from < 0 || from >= world_size) {
+    printf("ERROR: bad machine number in do nonidle machine: %d\n", from);
+  }
+  //  printf("NONIDLE %d\n", from);
+  int old = global_no_jobs[from] == TRUE;
+  int new = global_no_jobs[from] = FALSE;
+  if (old == TRUE && new == FALSE) {
+    global_empty_machines --;
+    if (global_empty_machines < 0) {
+      printf("ERROR: global_empty_machines too small: %d\n", global_empty_machines);
+    }
+  }
+}
+    
+void print_path(int path[], int depth) {
+  //  for (int i = depth; i >= 0; i--) {
+  for (int i = TREE_DEPTH-1; i >= depth; i--) {
+    printf(" [%d]%d", i, path[i]);
+  } 
+  printf("\n");
+}
 
+void msg_dispatch(child_msg_type *msg, int from) {
+      // dispatch
+  //  printf("DISPATCHING\n");
       if (msg->msg_type == CREATE_CHILD_AT) {
-	do_expand((child_msg *)msg);
+	//	printf("%d Expanding ", my_process_id); print_path(msg->path, msg->depth);
+	do_expand((child_msg_type *)msg);
+      } else if (msg->msg_type == SELECT_CHILD_AT) {
+	printf("%d Selecting ", my_process_id); print_path(msg->path, msg->depth); // path is alwyas [0,0,0,0] so lways the samen node is selected. the leftfirst leaf....
+	if (msg->depth <0 || msg->depth > TREE_DEPTH) {
+	  printf("ERROR in Dispatch depth %d\n", msg->depth);
+	}
+	node_type *node = lookup(msg->path, msg->depth);
+	if (node) {
+	  do_select(node);
+	} else {
+	  printf("LOOKUP returned NULL\n");
+	}
       } else if (msg->msg_type == UPDATE_PARENT_AT) {
-        do_update((update_msg *)msg);
+	printf("%d Update parent ", my_process_id); print_path(msg->path, msg->depth);
+        do_update((parent_msg_type *)msg);
       } else if (msg->msg_type == UPDATE_CHILD_AT) {
-        downward_update_children((update_msg *)msg);
+	printf("%d Update child ", my_process_id); print_path(msg->path, msg->depth);
+        downward_update_children((update_msg_type *)msg);
+      } else if (msg->msg_type == IDLE_MSG) {
+	do_idle_machine(from);
+      } else if (msg->msg_type == NONIDLE_MSG) {
+	do_nonidle_machine(from);
+      } else if (msg->msg_type == DECR_ACTIVE_ROOT) {
+	printf("Decrementing Active count in root\n", root->n_active_kids);
+	root->n_active_kids--;
       } else {
 	printf("ERROR: Wrong MPI message type\n");
         exit(0);
       }
-    }
-#else
-    job = pull_job(i);
+}
 
-    if (job) {
-      //     lock_node(job->node);
-      //        lock(&treemutex);
-      process_job(i, job);
-      //          unlock(&treemutex); 
-      //      unlock_node(job->node);
-    } else {
-      // pull returned null, queue must be empty. ask a random machine to flush their buffer
-      int steal_target = rand() % N_MACHINES;
-      //      printf("STEAL target: %d\n", steal_target);
-      flush_buffer(steal_target, i);
-    } 
-#endif
+
+
+void do_work_queue(int i) {
+  //  int workerNum = __cilkrts_get_worker_number();
+  int safety_counter = SAFETY_COUNTER_INIT;
+  global_empty_machines = world_size;
+
+  while (safety_counter-- > 0 && !global_done && live_node(root)) { 
+    job_type *job = NULL;
+
+    //    printf("%d active kids: %d\n", my_process_id, root->n_active_kids);
+
+    if (i == root->board && live_node(root) && root->n_active_kids == 0) {
+      //     printf("* globalempty machines: %d\n", global_empty_machines);
+
+      printf("%d CALLING SELECT_CHILD_AT FROM EMPTY WORKQUEUE at root. n_active: %d\n", my_process_id, root->n_active_kids);
+      select_child_at(root, 0, MAXNODE);
+    }
+
+    if (my_process_id == i) {
+      child_msg_type idle_msg, nonidle_msg;
+      idle_msg.msg_type = IDLE_MSG;
+      nonidle_msg.msg_type = NONIDLE_MSG;
+      MPI_Status status;
+      child_msg_type *msg = malloc(max(sizeof(child_msg_type), sizeof(parent_msg_type)));
+      for (int i=0; i<TREE_DEPTH; i++) {
+         ((child_msg_type*)msg)->path[i] = 0;
+      }
+
+      if (i != root->board) {
+	MPI_Send(&idle_msg, sizeof(idle_msg), MPI_BYTE, 0, 0, MPI_COMM_WORLD);
+      }
+      //      printf("RECEIVING\n");
+      MPI_Recv(msg, sizeof(child_msg_type), MPI_BYTE, MPI_ANY_SOURCE, MPI_ANY_TAG, MPI_COMM_WORLD, &status);
+      //      if (i != root->board) {
+      if (msg->msg_type != IDLE_MSG && msg->msg_type != NONIDLE_MSG) {
+	if (i != root->board) {
+	  MPI_Send(&nonidle_msg,  sizeof(idle_msg), MPI_BYTE, 0, 0, MPI_COMM_WORLD);
+	} else {
+	  do_nonidle_machine(i);
+	}
+      } 
+
+      msg_dispatch(msg, status.MPI_SOURCE);
+      //      printf("QQQ\n");
+    }
+
+    //    printf("globalempty machines: %d\n", global_empty_machines);
+    //    if (i == root->board && global_empty_machines >= world_size) {
+    // if root still is live, and thus has live kids, and none is being searched, can that happen????
     /*
-    lock(&global_jobmutex); // check
-    check_consistency_empty();
-    unlock(&global_jobmutex); // check
+    in roll-out, can there be live kids that are not searched?
+      it can in mcts. it happens all the time, after every child. at the end of a search/playout
+      it can in ab, it is the root next mvoe sequence. does orll out ab have a next move loop?
+no it has not. it goes all the way up to the root once it has expanded a singel leaf. it does not 
+automatically continue to the next brother.
+does it really not?????
+how dreadfully inefficient!
+      so, in rollout, we need to restart a roll out form the root as long as the root is live and
+there are no active searhces. 
+There can be no active searches wile the root is live. so liveness is no indicator for activity. 
+      we need to track activity separately, 
+
+      updated, but live, and then? automatic 
     */
+    
     global_done |= !live_node(root);
     if (global_done) {
       break;
@@ -226,437 +324,148 @@ void do_work_queue(int i) {
   //  global_done = 1;
 
   //  printf("M:%d. Finished. Queue is empty or root is solved. jobs: %d. root: <%d:%d> \n", i, total_jobs, root->a, root->b);
+
 }
 
 
-void create_child_at(node_type *node, int child_number) {
-  child_msg->msg_type = CREATE_CHILD_AT;
+void create_child_at(node_type *node, int child_number, int mm) {
+  int i = 0;
+  child_msg_type child_msg;
+  child_msg.msg_type = CREATE_CHILD_AT;
   int home_machine = where(node);
+  node->n_active_kids++;
+  /*
+klopt dit zo?
+elke select down doet een incr
+zijn er genoeg updates om hem naar 0 te krijgen?
+  */
   node->children_at[child_number] = home_machine;
-  child_msg->child_number = child_number;
-  child_msg->path = node->path + childnumber;
-  child_msg->wa = node->wa;
-  child_msg->wb = node->wb;
-  child_msg->depth = node->depth - 1;
-  child_msg->parent_at = my_id;
+  //  child_msg.depth = node->depth;
+  child_msg.child_number = child_number;
+  child_msg.mm = mm;
+  for (i=0; i < TREE_DEPTH; i++) { 
+    child_msg.path[i] = node->path[i]; 
+  }
+  child_msg.path[node->depth-1] = child_number;
+
+  //  here child_nuimber should be given to node->dpeth-1 (or +1)?
+
+  child_msg.wa = node->wa;
+  child_msg.wb = node->wb;
+  child_msg.depth = node->depth - 1;
+  child_msg.parent_at = my_process_id;
+
+  //  do_nonidle_machine(home_machine);
+
+  //  printf("%d create sending CHILD %d to %d\n", my_process_id, child_number, home_machine);
 
   // the idea to only send the pointer, not the full node.
-  MPI_Send(child_msg, sizeof(child_msg), MPI_BYTE, home_machine, 0, MPI_COMM_WORLD);
+  MPI_Send(&child_msg, sizeof(child_msg_type), MPI_BYTE, home_machine, 0, MPI_COMM_WORLD);
   // receiver must store parent-at, and copy wa wb
 }
 
+void select_child_at(node_type *node, int child_number, int mm) {
+  int i = 0;
+  child_msg_type child_msg;
+  child_msg.msg_type = SELECT_CHILD_AT;
+  int home_machine = where(node);
+  node->n_active_kids++;
+
+  node->children_at[child_number] = home_machine;
+  child_msg.child_number = child_number;
+  //  child_msg.depth = node->depth;
+  child_msg.mm = mm;
+  for (i=0; i < TREE_DEPTH; i++) {
+    child_msg.path[i] = node->path[i]; 
+  }
+  child_msg.path[node->depth] = child_number;
+
+  child_msg.wa = node->wa;
+  child_msg.wb = node->wb;
+  child_msg.depth = node->depth - 1;
+  child_msg.parent_at = my_process_id;
+
+  //  do_nonidle_machine(home_machine);
+
+  //  printf("%d select sending CHILD %d to %d\n", my_process_id, child_number, home_machine);
+
+  // the idea to only send the pointer, not the full node.
+  MPI_Send(&child_msg, sizeof(child_msg_type), MPI_BYTE, home_machine, 0, MPI_COMM_WORLD);
+  // receiver must store parent-at, and copy wa wb
+}
+
+void decr_active_root() {
+  update_msg_type m;
+  m.msg_type = DECR_ACTIVE_ROOT;
+  MPI_Send(&m, sizeof(update_msg_type), MPI_BYTE, 0, 0, MPI_COMM_WORLD);
+}
+
 void update_parent_at(node_type *node, int from_child_id) {
-  update_msg->msg_type = UPDATE_PARENT_AT;
-  int home_machine = node->parent_machine;
-  update_msg->from_child = from_child_id;
-  update_msg->lb = node->lb;
-  update_msg->ub = node->ub;
-  update_path->path = chop_child(node->path);
+  parent_msg_type parent_msg;
+  parent_msg.msg_type = UPDATE_PARENT_AT;
+  int home_machine = node->parent_at;
+  //but this is not passed to msg
+  //should be parent's active kid number that is decremented.' 
+  /*
+klopt dit? zo gauw er een update at een node is is die node inactive?
+kan er ook nooit meer iets gebeuren dat hij weer active wordt?
+alle kinderen inactief?
+  of kan re nog een update komen, van een parallel kind?
+ja tohc?
 
-  MPI_Send(update_msg, sizeof(update_msg), MPI_BYTE, home_machine, 0, MPI_COMM_WORLD);
+what we really want is to know if there is a possibility for an update that might come.
+only if there really cannot anymore come an update then a new root select should be scheduled
+
+so we should track the number of outstanding jobs
+
+or we can just flag when all machines are idle *and* no messages are in transit.
+How do we know they are idle? if they are blocked in a receive? so we should keep track of the machines that are in receive
+
+					of tellertje bijhouden in elke node. increment voor elk kind dat select of expand down gaat, en decrement voor elke update die omhoog voorbij komt.
+als de root dan op nul staat is er geen uitstaand werk meer en is de machine idle.
+kan niet anders. toch?
+					Roll out kent maar twee dingen: naar beneden en naar boven gaan. ook paralllel roll out, die gaat naar beneden en naar boven. vandaar het tellertje.
+
+en het tellertje telt hoeveel actieve kinderen er zijn. dus elke expand van een kind en elke select van een kind zorgt voor een ophoging. 
+en elke update van een kind naar een parent verlaaggt de teller van die parent
+dus een 2-par expand hoogt de teller met 2 op.
+
+  */
+
+  parent_msg.from_child = from_child_id;
+  parent_msg.depth = node->depth +1;
+  parent_msg.child_live = node->lb < node->ub;
+  parent_msg.lb = node->lb;
+  parent_msg.ub = node->ub;
+  parent_msg.mm = opposite(node);
+  for (int i=0; i < TREE_DEPTH; i++) {
+    parent_msg.path[i] = node->path[i];
+  }
+  //  printf("%d SEND update to parent\n", my_process_id);
+  MPI_Send(&parent_msg, sizeof(parent_msg_type), MPI_BYTE, home_machine, 0, MPI_COMM_WORLD);
 }
 
-void update_child_at(node_type *node, int p) {
-  update_msg->msg_type = UPDATE_CHILD_AT;
-  int home_machine = node->children_at[p];
+void update_child_at(node_type *node, int child_number) {
+  int i = 0;
+  update_msg_type update_msg;
+  update_msg.msg_type = UPDATE_CHILD_AT;
+  int home_machine = node->children_at[child_number];
   //  update_msg->from_child = from_child_id;
-  update_msg->a = node->a;
-  update_msg->b = node->b;
-  update_msg->path = node->path + p;
+  update_msg.depth = node->depth - 1; // -1 since child: closer to leaves which are dpeth==0
+  update_msg.a = node->a;
+  update_msg.b = node->b;
+  for (i=0; i < TREE_DEPTH; i++) {
+    update_msg.path[i] = node->path[i];
+  }
+  update_msg.path[node->depth] = child_number;
 
-  MPI_Send(update_msg, sizeof(update_msg), MPI_BYTE, home_machine, 0, MPI_COMM_WORLD);
+  //  printf("%d SEND update to child\n", my_process_id);
+  MPI_Send(&update_msg, sizeof(update_msg_type), MPI_BYTE, home_machine, 0, MPI_COMM_WORLD);
+
 }
 
 
 
-// schedule node at the remote job_queue that is its home machine
-// with job action t, and optional argument a
-// pass the continuation
-
-void schedule(int my_id, node_type *node or parent machine???, int type, int from_child, int lb, int ub) {
-  /*
-  how does the parent machine find the node to work on, how does it find the pointer? does it do a TT lookup? with the path? does it need to be passed in the path of the node?
-												   
-axually, we do not want to start shipping whole nodes accross the network. can't we just ship pointers to the nodes? only the path's?
-		 we do ship whole nodes in select, where it creates all the children, who are then shiped to their desinations
-but for updating parents we want to update them in place at the destination.
-it is not a create but a reference
-
-  so we can do remote create, where the creates are done based on path
-  so then *node (second argument) must be node_path
-
-  put path formula for treewidth > 9 does not work, because 11 and 1 1 are indistinguishable
-   make a string, a dotted notation, or an array of ints indicating the node id???
-array of ints is easiest
-
-doing remote update
-and remote create
-both based on path
-				     but remote create needs parent, bounds, a/b
-				     yes, let's list what arguments remote create needs,
-and what arguments remote update needs. Any other operation's?
-
-
- remote create-child-at: path, parent-depth, parent-at, parent_wa, parent_wb //child number(in path), parent in path
- remote update-parent-at: path, lb_from_child, ub_from_child, from_child_id
-
-
-issuetje: new_leaf bevat de board berekening, waar pas bepaalt wordt op welke machine de node 
-geplaatst gaat worden. dus dat moet door de aanroeper plaatsvindne, want anders weet je niet naar welke machien je hem moet sturen.
-of we moeten de board berekening uit de new_leaf halen. dat kan natuurlijk best. Dan kun je hem welk remote createn. de arme new_leaf zonder de board berekening blijft over en gaat remote, er 
-moet een where() fundtie gemaakt worden die locaal de bestemming van de node bepaalt, en
-dan dat meesturen aan de schedule, die hem dan daar heen stuurt
-
-
-  */
-
-  if (node) {
-    // send to remote machine
-    int home_machine = node->board;
-    node->from_child = from_child;
-    int was_empty = empty_jobs(home_machine);  
-    add_to_queue(my_id, new_job(node, type, lb, ub));
-what is from?
-    /*
-    if (was_empty) {
-      //      printf("Signalling machine %d for path %d type:[%d]. in wait: %d\n", home_machine, node->path, t, global_in_wait);
-      pthread_cond_signal(&job_available[home_machine]);
-      //   pthread_cond_signal(&global_job_available[home_machine]); //how do we know that we signal the correct machine?
-    }
-    */
-  } 
-}
-
-// which q? one per processor
-void add_to_queue(int my_id, job_type *job) {
-  to schedule parent (update) home machine must be calculated. do it differently? pass in the parent machine?
-  int home_machine = job->node->board;
-  int jobt = job->type_of_job;
-  if (home_machine >= N_MACHINES) {
-    printf("ERROR: home_machine %d too big\n", home_machine);
-    exit(1);
-  }
-  /*
-  if (top[home_machine][jobt] >= N_JOBS) {
-    printf("M%d Top:%d ERROR: queue [%d] full\n", home_machine, top[home_machine][jobt], jobt);
-    exit(1);
-  }
-  */
-  push_job(my_id, home_machine, job);
-}
-
-
-/* 
-** PUSH JOB
-*/
-
-// home_machine is the machine at which the node should be stored
-void push_job(int my_id, int home_machine, job_type *job) {
-  //  printf("M:%d PUSH   ", home_machine);
-#ifdef GLOBAL_QUEUE
-#ifdef LOCAL_LOCK
-  lock(&jobmutex[home_machine]); // push
-#else
-  lock(&global_jobmutex); // push
-#endif
-#endif
-  total_jobs++;
-  if (empty_jobs(home_machine) && global_empty_machines > 0) {
-    // I was empty, not anymore
-    //    printf("M:%d is empty. decr global-empty %d\n", home_machine, global_empty_machines);
-    global_empty_machines--; this will not work. no globl counters anymore
-    /*
-hmm. this is invoked when local_top is empty. but push now only works with buffer. so localtop sometimes says empty when there are nonempty buffers.  causing too many selects to be scheduled.
-so empty should first do a global flush before more jobs are scheduled. or take the remote buffer counts into account
-dit zou dus voor een te lage waarde van globalemptymachines moeten leiden. of andersom?????
-emptyjobs zegt te vaak ja. 
-dus globalemptymachines is te laag
-			   dus te weinig selects gescheduled. dus soms deadlock, omdat er jobs in buffers zitten
-    */
-  }
-  int jobt = job->type_of_job;
-  //int jobt = SELECT;
-#ifdef MSGPASS
-  // perhaps add some message combining/buffering to reduce communication overhead
-  copy_job_to_node(job, job->node); // yes this is strange
-  MPI_Send(job->node, sizeof(node_type), MPI_INT, home_machine, 0, MPI_COMM_WORLD);
-#else
-#ifdef GLOBAL_QUEUE
-  queue[home_machine][++(top[home_machine][jobt])][jobt] = job;
-  max_q_length[home_machine][jobt] = 
-    max(max_q_length[home_machine][jobt], top[home_machine][jobt]);
-#else
-  // check if local buffer is full, then need to flush to main work queue, which is remote on another machine
-  if (buffer_top[my_id][home_machine] >= BUFFER_SIZE-1) {
-    flush_buffer(my_id, home_machine);
-  }
-  // fill local buffer with one new job
-  local_buffer[my_id][home_machine][++buffer_top[my_id][home_machine]] = job;
-#endif
-
-  
-#ifdef LOCAL_LOCK
-  unlock(&jobmutex[home_machine]); // push
-#else
-  unlock(&global_jobmutex); // push
-#endif
-
-  // if MPI
-#endif
-
-#define PRINT_PUSHES
-#ifdef PRINT_PUSHES
-  if (seq(job->node)) {
-    //        printf("ERROR: pushing job while in seq mode ");
-  }
-  assert(home_machine == job->node->board);
-
-  printf("    M:%d P:%d %s TOP[%d] PUSH  [%d] <%d:%d> total_jobs: %d\n", 
-	 job->node->board, job->node->path, 
- 	 job->node->maxormin==MAXNODE?"+":"-", 
-	 job->node->board, job->type_of_job,
-	 job->node->a, job->node->b, total_jobs);
-#endif
-  //  sort_queue(queue[home_machine], top[home_machine]);
-  //  print_queue(queue[home_machine], top[home_machine]);
-}
-
-
-void flush_buffer(int my_id, int home_machine) {
-  if (buffer_top[my_id][home_machine] == 0) {
-    return;
-  }
-    // local buffer is full. flush to the remote machine and insert in the queue. lock the remote machine queue
-    lock(&jobmutex[home_machine]);
-    int item = 0;
-    //    printf("Flushing [%d] buffer to M:%d size %d\n", my_id, home_machine, buffer_top[my_id][home_machine]);
-    for (item = 1; item <= buffer_top[my_id][home_machine]; item++) {
-      // insert the items on top of the current top, append at the end
-      job_type *job = local_buffer[my_id][home_machine][item];
-      local_queue[home_machine][++local_top[home_machine]] = job;
-      if (local_top[home_machine] >= N_JOBS) {
-	printf("Local_top[%d]: %d\n", home_machine, local_top[home_machine]);
-	printf("Root: <%d:%d>\n", root->a, root->b);
-	//kunnen we queues printen waaruit blijkt waar de deadlock zit?
-	for (int m=0; m < N_MACHINES; m++) {
-	  for (int j=1; j < local_top[m]-1; j++) {
-	    if (j%1000==0) {
-	      printf("M:%d Q[%d]=%d\n", m, j, local_queue[m][j]->type_of_job);
-	    }
-	  }
-	}
-	print_q_stats();
-	exit(0);
-      }
-      //      first buffer-top index value is 1 (0 is not used) but for loop with item is 0..buffer_top non-inclusive. going one too low
-#undef PRINT_FLUSH
-#ifdef PRINT_FLUSH
-      if (job) {
-	printf("    M:%d P:%d %s TOP[%d]FLUSHING  [%d] <%d:%d> total_jobs: %d\n", 
-	     job->node->board, job->node->path, 
-	     job->node->maxormin==MAXNODE?"+":"-", 
-	     job->node->board, job->type_of_job,
-	     job->node->a, job->node->b, total_jobs);
-      } else {
-	printf("Job is null in FLUSH\n");
-      }
-#endif
-    }
-    //    printf("flushed %d jobs. local_top: %d\n", item-1, local_top[home_machine]);
-    buffer_top[my_id][home_machine] = 0;
-    unlock(&jobmutex[home_machine]);
-    max_q_length[home_machine] = 
-      max(max_q_length[home_machine], local_top[home_machine]);
-}
-
-void check_consistency_empty() {
-  int e = 0;
-  for (int i = 0; i < N_MACHINES; i++) {
-    e += empty_jobs(i);
-  }
-  if (e != global_empty_machines) {
-    printf("ERROR: inconsistency empty jobs %d %d\n", global_empty_machines, e);
-    exit(0);
-  }
-}
-
-void check_job_consistency() {
-  /*
-  int j = 0;
-  for (int i = 0; i < N_MACHINES; i++) {
-    j += top[i][SELECT] + top[i][UPDATE] + top[i][BOUND_DOWN] + top[i][PLAYOUT];
-  }
-  if (total_jobs != j) {
-    printf("ERROR Inconsistency total_jobs =/= j %d %d\n", total_jobs, j);
-    exit(0);
-  }
-  */
-}
-
-/*
-** PULL JOB
-*/
-
-// non-blocking 
-// home_machine is the id of the home_machine of the node
-job_type *pull_job(int home_machine) {
-  //  printf("M:%d Pull   ", home_machine);
-
-
-  //#ifdef LOCAL_LOCK
-  lock(&jobmutex[home_machine]);  // pull
-  //#else
-  //  lock(&global_jobmutex);  // pull
-  //#endif
-  //#ifdef GLOBAL_QUEUE
-  //#else
-  // no locks, not ever. this cannot be right. it must be protected from a push flush
-  if (local_top[home_machine] > 0) {
-    //    how can pull know if there are jobs remotely that can be gotten througha forceed remote flush, and versus just waiting for the jobs to accumulate and be flushed to us automatically?
-    // hwo can we solve the startup problem? the machine must be allowed to run as a small machine in order to grow bigger
-    job_type *job = local_queue[home_machine][local_top[home_machine]--];
-    if (empty_jobs(home_machine)) {
-      /*
-      emotyjobs is too hi there may be jobs in a buffer, where empty says top is 0, so epmty is too high, and global emptymachines is too high, so too many selects are scheduled
-local-empty should take local-buffertop into account
-      */
-	//	printf("M:%d will be empty. incr global_empty %d\n", home_machine, global_empty_machines);
-	global_empty_machines++;
-    }
-#undef PRINT_PULLS
-#ifdef PRINT_PULLS
-    if (job) {
-      printf("    M:%d P:%d %s TOP[%d]PULL  [%d] <%d:%d> jobs: %d\n", 
-	     job->node->board, job->node->path, 
-	     job->node->maxormin==MAXNODE?"+":"-", 
-	     job->node->board, job->type_of_job,
-	     job->node->a, job->node->b, total_jobs);
-    } else {
-      printf("  M:%d  PULL: job is null. local_top: %d\n", home_machine, local_top[home_machine]);
-    }
-#endif
-    unlock(&jobmutex[home_machine]);  // pull
-    return job;
-  } else {
-    // local queue is empty. wait for the buffer to give me a refill 
-    unlock(&jobmutex[home_machine]);  // pull
-    return NULL;
-  }
-  exit(99); // should never reach
-  //#endif
-  int jobt = BOUND_DOWN;
-  // first try bound_down, then try update, then try select
-  while (jobt > 0) {
-#ifdef GLOBAL_QUEUE
-    if (top[home_machine][jobt] > 0) {
-#else
-    if (local_top[home_machine] > 0) {
-#endif
-      total_jobs--;
-      /*
-      if (no_more_jobs_in_system(home_machine)) {
-
-	pthread_cond_signal(&job_available[root->board]);
-	//pthread_cond_signal(&global_job_available);
-	// send signal naar root home machnien;
-      }
-      */
-      //      assert(total_jobs >= 0);
-
-#ifdef GLOBAL_QUEUE
-      job_type *job = queue[home_machine][top[home_machine][jobt]--][jobt];
-#else
-      job_type *job = local_queue[home_machine][local_top[home_machine]--];
-#endif
-      if (empty_jobs(home_machine)) {
-	//	printf("M:%d will be empty. incr global_empty %d\n", home_machine, global_empty_machines);
-	global_empty_machines++;
-      }
-      //      check_job_consistency();
-#ifdef LOCAL_LOCK
-      unlock(&jobmutex[home_machine]);  // pull
-#else
-      unlock(&global_jobmutex);  // pull
-#endif
-      return job;
-    }
-    jobt --;
-  }
-#ifdef LOCAL_LOCK
-  unlock(&jobmutex[home_machine]); // pull
-#else
-  unlock(&global_jobmutex); // pull
-#endif
-  global_no_jobs[home_machine]++;
-  return NULL;
-}
-
-
-
-
-
-/*
-// swap the pointers to jobs in the job array
-void swap_jobs(job_type *q[], int t1, int t2) {
-  job_type *tmp = q[t1];
-  q[t1] = q[t2];
-  q[t2] = tmp;
-}
-
-// this is not a full sort
-// this is a single pass that, performed on a sorted list, will 
-// keep it sorted.
-void sort_queue(job_type *q[], int t) {
-  return;
-  // last inserted job is at the top
-  // percolate update to the top. that is, percolate SELECTS down
-  if (!q[t]) {
-    return;
-  }
-  int top = t;
-  if (q[t]->type_of_job == SELECT) {  
-    //  keep going down until the other node is a SELECT
-    while (top-- > 0 && q[top] && q[top]->type_of_job != SELECT) {
-      swap_jobs(q, top+1, top);
-    }
-  }
-  // now top is either an UPDATE or an EXPAND or a SELECT next to other SELECTS
-  // now sort on depth. nodes with a low value for depth are closest 
-  // to the leaves, so I want the lowest depth values to be nearest the top
-  while (top-- > 0 && q[top] && q[top]->node->depth < q[top+1]->node->depth) {
-    swap_jobs(q, top+1, top);
-  }
-}
-*/
-
-// there is a new bound. update the selects in the job queue 
-int update_selects_with_bound(node_type *node) {
-  return TRUE; // since in the shared mem version all updates to bounds
-  // are already done in downwardupdartechildren: as soon as you update
-  // the bounds in the child nodes, since the job queue 
-  // has pointers to the nodes, all entries in the 
-  // job queue are updated automatically
-
-  int home_machine = node->board;
-  int continue_update = 0;
-  // find all the entries for this node in the job queue
-#ifdef GLOBAL_QUEUE
-  for (int i = 0; i < top[home_machine][SELECT]; i++) {
-    job_type *job = queue[home_machine][i][SELECT];
-#else
-  for (int i = 0; i < local_top[home_machine]; i++) {
-    job_type *job = local_queue[home_machine][i];
-#endif
-    if (job->node == node && job->type_of_job == SELECT) {
-      //      since node == node I do not really have to update the bounds, they are already updated....
-      continue_update |= job->node->a < node->a;
-      job->node->a = max(job->node->a, node->a);
-      continue_update |= job->node->b > node->b;
-      job->node->b = min(job->node->b, node->b);
-    }
-  }
-  return (continue_update);
-}
 
 void print_queue(job_type *q[], int t){
   for (int i = 0; i <= t; i++) {
@@ -667,17 +476,3 @@ void print_queue(job_type *q[], int t){
     }
   }
 }
-
-void process_job(int my_id, job_type *job) {
-  //  printf("Process job\n");
-  if (job && job->node && live_node(job->node)) {
-    switch (job->type_of_job) {
-    case SELECT:      do_select(my_id, job->node);  break;
-    case PLAYOUT:     do_playout(my_id, job->node); break;
-    case UPDATE:      do_update(my_id, job->node, job->from_child, job->lb, job->ub);  break;
-    case BOUND_DOWN:  do_bound_down(my_id, job->node);  break;
-    otherwise: printf("ERROR: invalid job  type in q\n"); exit(0); break;
-    }
-  }
-}
-

@@ -1,8 +1,10 @@
 #include <stdio.h>         // for print
 #include <stdlib.h>        // for rand
 #include <assert.h>        // for print
-#include <pthread.h>
-#include "parab.h"         // for prototypes and data structures
+//#include <pthread.h>
+#include <mpi.h>
+#include "parabm.h"         // for prototypes and data structures
+
 
 
 /* 
@@ -115,6 +117,7 @@ DOWNWARD:
  
 node_type *root = NULL;
 int my_process_id; // MPI rank
+#ifndef MSGPASS
 #ifdef GLOBAL_QUEUE
 job_type *queue[N_MACHINES][N_JOBS][JOB_TYPES];
 int top[N_MACHINES][JOB_TYPES];
@@ -126,7 +129,9 @@ job_type *local_buffer[N_MACHINES][N_MACHINES][BUFFER_SIZE];
 int buffer_top[N_MACHINES][N_MACHINES];
 int max_q_length[N_MACHINES];
 #endif
+#endif
 int total_jobs = 0;
+/*
 pthread_mutex_t jobmutex[N_MACHINES];
 pthread_mutex_t global_jobmutex = PTHREAD_MUTEX_INITIALIZER;
 pthread_cond_t job_available[N_MACHINES];
@@ -134,14 +139,16 @@ pthread_cond_t job_available[N_MACHINES];
 pthread_mutex_t treemutex = PTHREAD_MUTEX_INITIALIZER;
 pthread_mutex_t donemutex = PTHREAD_MUTEX_INITIALIZER;
 pthread_mutex_t global_queues_mutex = PTHREAD_MUTEX_INITIALIZER;
+*/
 int n_par = 1;
+
+hash_entry_type hash_table[HASH_TABLE_SIZE];
 
 // all these will no longer work...
 int sum_global_selects = 0;
 int sum_global_leaf_eval = 0;
 int sum_global_updates = 0;
 int sum_global_downward_aborts = 0;
-int global_empty_machines = N_MACHINES;
 
 int global_selects[N_MACHINES];
 int global_leaf_eval[N_MACHINES];
@@ -159,8 +166,10 @@ int global_unorderedness_seq_n[TREE_DEPTH];
 // return the index of the first live child
 int first_live_child(node_type *node) {
   int n = 0;
+  //  printf("%d FLC: N: %d ", my_process_id, node->n_children); print_path(node->path, node->depth);
   for (n = 0; n < node->n_children; n++) {
     if (node->live_children[n]) {
+      //      printf("%d LIVE child %d ", my_process_id, n); print_path(node->path, node->depth);
       return n;
     }
   }
@@ -175,33 +184,26 @@ int first_live_child(node_type *node) {
 // but only one node at a time, since each node has its own home machine
 // precondition: my bounds 
 void do_select(node_type *node) {
-  global_selects[node->board]++; // does not work with distributed address spaces
-  if (node && live_node(node)) {
+  if (!node) {
+    printf("ERROR: child not found in select\n");
+    exit(0);
+  }
+  printf("IN SELECT. Node: %p. Live: %d\n", node, live_node(node));
+  if (node) {
 
-    /* 
-     * alpha beta update, top down 
-     */
-    
-    // get bounds from parent. this requires a synchronous remote MPI lookup to parent bounds.
-    // this might be optimized in the call to (scheduling of) the select. but then they are old bounds,
-    // at schedule time. not at execute time. or bounds should be propagated by hte parents to us, when
-    // a change happens. so hash entries of a node must have ab bounds, which are asynchronously updated, not on request, but when in changes, change propagation
-    //    compute_bounds(node); // will be done by explicit job to updates boundsexplicitly
-
-#undef PRINT_SELECT
+#define PRINT_SELECT
 #ifdef PRINT_SELECT
-    printf("M%d P%d: %s SELECT d:%d  ---   <%d:%d>  \n", 
-	   node->board, node->path, node->maxormin==MAXNODE?"+":"-",
+    printf("M%d  %s SELECT d:%d  ---   <%d:%d>  \n", 
+	   node->board,  node->maxormin==MAXNODE?"+":"-",
 	   node->depth,
 	   node->a, node->b);
 #endif
     if (leaf_node(node)) { // depth == 0; frontier, do playout/eval
-      //      printf("M:%d PLAYOUT\n", node->board);
-      //      schedule(my_id, node, PLAYOUT, NO_ARG);
       do_playout(node);
     } else if (live_node(node)) {
       int flc = first_live_child(node); // index of first_live_child
-      if (flc != NO_LIVE_CHILD) {
+      printf("FLC: %d\n", flc);
+      if (flc == NO_LIVE_CHILD) {
 #ifdef PUO 
 	int highest_child_in_par = 0;
 	if (global_unorderedness_seq_n[node->depth]) {
@@ -214,21 +216,35 @@ void do_select(node_type *node) {
 	}
 #else
 	int highest_child_in_par = n_par;
-#endif
-	//	betekent dit dat we in subsequent passes wel of niet voorbij n_par kunnen komen? pakken we in de tweede pass de draad op waar de in de eerste gebleven waren? starten we bij kind n of bij kind 0 (overnieuw)?
+#endif   
+	printf("Highest child in par is %d\n", highest_child_in_par);
 
-	for (int p = flc; p < higest_child_in_par; p++) {
+	int children_created = 0;
+	for (int p = 0; p < TREE_WIDTH; p++) {
 	  if (node->live_children[p] && !seq(node)) {
-	    //	    child = new_leaf(node, p);
-	    //	    node->children_at[p] = child->board;
-	    //	    schedule(my_id, child, EXPAND, from_child, node->wa, node->wb); 
-	    create_child_at(node, p);
-	  } 
-	}
+	    node->n_children ++;
+	    printf("%d CALLING CREATE CHILD (%d) AT FROM DO_SELECT node/active: %d root/active: %d   ", 
+		   my_process_id, p, node->n_active_kids, root->n_active_kids); print_path(node->path, node->depth);
+	    /*
+	    this creates a child, I really need to create a brother (same level, not a level deeper to the leaves). no, I do need to create a child, but for some reason it creates the wrong one. I am at 0.0, need to create 0.0.1, and do create 0.1.0
+ the p in the argument is not passed to the new_leaf, but taken as the id of the parent
+	    */
+	    create_child_at(node, p, opposite(node));
+	    children_created++;
+	    // do not create more children in par than 
+	    if (children_created > highest_child_in_par) {
+	      break;
+	    }
+	  } // if
+	} // for
+      } else { // flc is existing child
+	//	printf("%d Doing select child at of child %d  ", 
+	//     my_process_id, flc); print_path(node->path, node->depth);
+	select_child_at(node, flc, opposite(node));
       }
     } else if (dead_node(node) && !root_node(node)) { // cutoff: alpha==beta
       // record cutoff and do this in statistics which child number caused it
-      global_unorderedness_seq_x[node->depth] += (double)child_number(node->path);
+      global_unorderedness_seq_x[node->depth] += (double)node->my_child_number; //child_number(node->path);
       global_unorderedness_seq_n[node->depth]++;
       /*
       printf("guos(%d): %lf/%d\n", node->depth,
@@ -237,18 +253,19 @@ void do_select(node_type *node) {
       */
 #define UPDATE_AFTER_CUTOFF
 #ifdef UPDATE_AFTER_CUTOFF
-      if (node->parent) {
+//      if (node->parent) {
 	//do we need BESTCHILD anymore? update now has a way of updating values without needing the bestchild pointer
 	//	schedule(my_id, node->parent, BESTCHILD, node);
 	// update really schdules the parent, but I do not have the parent node here, so UPDATE has to fudge something. 
-	update_parent_at(node, my_id);
+      printf("CUTOFF\n");
+      update_parent_at(node, my_process_id);
 	//	schedule(my_id, node, UPDATE, node->my_child_number, lb, ub);
-      }
+	//    }
 #endif
     } else {
       printf("M%d ERROR: not leaf, not dead, not live: %d\n", 
 	     node->board, node->path);
-      print_tree(root, 2);
+      //      print_tree(root, 2);
       exit(0);
     }
   }
@@ -272,30 +289,38 @@ En wat is de betekenis van de pointer die new_leaf opleverd als de nieuwe leaf
 // Add new children, schedule them for selection
 // Can this work? it references nodes (children) at other home machines
 // must find out if remote pointers is doen by new_leaf or by schedule
-void do_expand(child_msg *msg) {
+void do_expand(child_msg_type *msg) {
+  if (msg->depth <0 || msg->depth > TREE_DEPTH) {
+    printf("ERROR in Do Expand depth %d\n", msg->depth);
+  }
+
+  printf("%d EXPAND: depth: %d  ", my_process_id, msg->depth); print_path(msg->path, msg->depth);
+
+  node_type *node = lookup(msg->path, msg->depth);
+
   // receiver must store parent-at, and copy wa wb
-  node_type *node = lookup(msg->path);
+
+  printf("EXPAND. childnumber is: %d while path is ", msg->child_number); print_path(msg->path, msg->depth);
   if (!node) {
     // existing nodes are not created
     // exisitng nodes are traveersed, and then SELECT?
-    node = new_leaf(msg->path); 
-    //    dit kan niet zo. new_leaf bevat de board berekening, daar pas wordt bepaald op welke machine de node 
-    //      terechtkomt. Dus de new_leaf moet al voor verzending plaatsvinden, anders weet je niet aan wie je het moet verzenden. ok. simpel. dus new_leaf in de select voor de schedule zetten.
 
-    //      copieer je een node of alleen het pad (een pointer). aleen een pointer kan niet, want voor het reconstrueren van alle waarden heb je de node nodig, en die zit in een gegeugen elders.
-
-    //      dus toch de hele node oversturen (deep copy)
-    //copy in wa wb bounds
-    
+    node = new_leaf(msg, msg->child_number, msg->mm); 
+    if (!node) {
+      printf("NEW LEAF returned null\n");
+    }
     node->parent_at = msg->parent_at;
     node->path = msg->path;
+    //    printf("Storing node "); print_path(node->path, node->depth);
     store(node);
-  } 
+  }  else {
+    printf("Node existed "); print_path(node->path, node->depth);
+  }
   // make sure existing children get the new wa and wb bounds of their parent
   node->wa = msg->wa;
   node->wb = msg->wb;
 
-  if (node_live(node)) {
+  if (live_node(node)) {
     //    schedule(my_id, node, SELECT, NO_ARG);
     do_select(node); // at same machine
   }
@@ -310,23 +335,24 @@ void do_expand(child_msg *msg) {
 void do_playout(node_type *node) {
   node->a = node->b = node->lb = node->ub = evaluate(node);
   
-  printf("M%d P%d: PLAYOUT d:%d    A:%d\n", 
-   	 node->board, node->path, node->depth, node->a);
+  printf("M%d PLAYOUT d:%d    A:%d    ", 
+   	 node->board,  node->depth, node->a);
+  print_path(node->path, node->depth);
   
   // can we do this? access a pointer of a node located at another machine?
   //  schedule(node->parent, UPDATE, node->lb, node->ub);
-  if (node->parent) {
+  //  if (node->parent) {
     //    set_best_child(node);
     //    node->parent->best_child = node;
     //    schedule(my_id, node->parent, UPDATE, {int from_me = my_id}, node->lb, node->ub);
-    update_parent_at(node, my_id);
-  }
+  update_parent_at(node, my_process_id);
+    //  }
 }
 
 int evaluate(node_type *node) {
   //  return node->path;
   global_leaf_eval[node->board]++;
-  srand(node->path); // create deterministic leaf values
+  srand(hash(node->path, node->depth)); // create deterministic leaf values
   return rand() % (INFTY/8) - (INFTY/16);
 }
 
@@ -337,19 +363,34 @@ int evaluate(node_type *node) {
 // backup through the tree
 // best_lb and best_ub are the highest lb of all closed kids and the lowest ub of all closed kids... or is it the highest lb and ub in max nodes, and the lowest lb and ub in min nodes???????? or is it just the latest lb and ub and are the best values computed here, in this code, by node?
 // possibly different children
-void do_update(parent_msg *msg) {
-  node_type *node = lookup(msg->path);
-  if (!node) {
-    printf("ERROR: parent not found in update\n");
-    exit(0);
+void do_update(parent_msg_type *msg) {
+  if (msg->depth <0 || msg->depth > TREE_DEPTH) {
+    printf("ERROR in Do Update depth %d\n", msg->depth);
   }
+  node_type *node = lookup(msg->path, msg->depth);
+  if (!node) {
+    printf("ERROR: parent not found in update --  "); print_path(msg->path, msg->depth);
+    //    exit(0);
+    return;
+  }
+  node->depth = msg->depth;
   int from_child_number = msg->from_child;
   int lb_of_child = msg->lb;
   int ub_of_child = msg->ub;
-  //  printf("%d UPDATE\n", node->path);
+  node->maxormin = msg->mm;
+  node->n_active_kids--;
+  if (node == root) {
+    printf("***************************************************************************************UPDATING ROOT\n");
+  }
+
+  printf("%d UPDATE from:%d, lb:%d, ub:%d mm:%d, d:%d, active:%d root/active:%d\n", 
+	 node->path, from_child_number, lb_of_child, ub_of_child, node->maxormin, 
+	 node->depth, node->n_active_kids, root->n_active_kids);
 
   if (node) {
     int continue_updating = 0;
+    int old_lb = node->lb;
+    int old_ub = node->ub;
     
     //    global_updates[node->board]++;
 
@@ -369,32 +410,23 @@ void do_update(parent_msg *msg) {
       node->lb = max(node->lb, lb_of_child);
       node->max_of_closed_kids_ub = max(node->max_of_closed_kids_ub, ub_of_child);
       node->ub = node->n_open_kids > 0 ? INFTY : node->max_of_closed_kids_ub;
-      continue_updating = (node->b != INFTY || node->a != old_a);
+      continue_updating = (node->ub != INFTY || node->lb != old_lb);
     }
     if (node->maxormin == MINNODE) {
-      node->a = min_of_alpha_kids(node);
-      int old_b = node->b;
-      node->b = min(node->b, node->best_child->b);
-      continue_updating = (node->a != -INFTY || node->b != old_b); // if a full min node has been expanded, then an alpha has been bound, and we should propagate it to the max parent
-      node->lb = min_of_lb_kids(node);
-      node->ub = min(node->ub, node->best_child->ub);
+      //      node->a = min_of_alpha_kids(node);
+      //      int old_b = node->b;
+      //      node->b = min(node->b, node->best_child->b);
+      node->ub = min(node->ub, ub_of_child);
+      node->min_of_closed_kids_lb = min(node->min_of_closed_kids_lb, lb_of_child);
+      node->lb = node->n_open_kids > 0 ? -INFTY : node->min_of_closed_kids_lb;
+      continue_updating = (node->lb != -INFTY || node->ub != old_ub); // if a full min node has been expanded, then an alpha has been bound, and we should propagate it to the max parent
     }
-    /*
-    check_abort(node); or better: propagate updates downward, not necessarily aborting, but must at least update bounds.
-    Should not we here check if any of the children die, so that they can be removed from the job queues and the search of them is stopped?
+    
+    node->live_children[from_child_number] = msg->child_live;
+    //node->lb < node->ub; dit klopt niet. dit is of de huidige node live is. niet het kind.
 
-				      par search is more than ensemble. in ensemble search all searches are independent. in par they are dependent, the influence each other, one result may stop 
-				      bound propagtion, is that asynch to job queue, just scan all jobs for subchildren, and update bound, or can we send an update/select job to the queues?
-    */
-#undef PRINT_UPDATE
-#ifdef PRINT_UPDATE
-    if (node && node->parent) {
-      printf("M%d P%d %s UPDATE d:%d  --  %d:<%d:%d> n_ch:%d\n", 
-	     node->board, node->path, node->maxormin==MAXNODE?"+":"-", 
-	     node->depth, node->parent->path,
-	     node->a, node->b, node->n_children);
-    }
-#endif
+    printf("Continue update is %d. lb: %d, ub: %d, oldlb:%d, oldub:%d live: %d\n", 
+	   continue_updating, node->lb, node->ub, old_lb, old_ub, msg->child_live);
 
     //    if (node == root) {
     //      printf("Updating root <%d:%d>\n", node->a, node->b);
@@ -402,17 +434,25 @@ void do_update(parent_msg *msg) {
     
     if (continue_updating) {
       // schedule downward update to parallel searches
-      downward_update_children(my_id, node);
+      // downward_update_children(node);
+      //      so downard update is scheduled for all children, irregardless of theire existence. also for non-expanded children
+      for (int ch = 0; ch < node->n_children; ch++) {
+	if (node->live_children[ch]) {
+	  printf("Updating live child %d for node  ", ch); print_path(node->path, node->depth);
+	  update_child_at(node, ch);
+	}
+      }
       // schedule upward update
-      if (node->parent) {
+      //      if (node->parent) {
 	//	if (node->parent->best_child) {
 	//	set_best_child(node);
 	//	} 
 	//      	printf("%d schedule update %d\n", node->path, node->parent->path);
 	//	schedule(my_id, node->parent, UPDATE, from_me, lb, ub);
-	update_parent_at(node, my_id);
-      }
+      update_parent_at(node, my_process_id);
+	//      }
     } else {
+      decr_active_root();
       // keep going, no longer autmatic select of root. select of this node
       //      schedule(node, SELECT);
     }
@@ -421,11 +461,14 @@ void do_update(parent_msg *msg) {
 
 // in a parallel search when a bound is updated it must be propagated to other
 // subtrees that may be searched in parallel
-void downward_update_children(update_msg *msg) {
+void downward_update_children(update_msg_type *msg) {
   //  return;
-  node_type *node = lookup(msg->path);
+  if (msg->depth <0 || msg->depth > TREE_DEPTH) {
+    printf("ERROR in Do downward depth %d\n", msg->depth);
+  }
+  node_type *node = lookup(msg->path, msg->depth);
   if (!node) {
-    printf("ERROR: child not found in update\n");
+    printf("ERROR: child not found in update\n"); print_path(msg->path, msg->depth);
     exit(0);
   }
 
@@ -441,7 +484,7 @@ void downward_update_children(update_msg *msg) {
     node->b = min(b_of_parent, node->b);
     
     if (continue_update) {
-      for (int ch = 0; ch < node->n_children && node->children[ch]; ch++) {
+      for (int ch = 0; ch < node->n_children; ch++) {
 	update_child_at(node, ch);
       }
     }
@@ -462,3 +505,5 @@ void do_bound_down(int my_id, node_type *node) {
 
 */
 // end
+
+//(rot13 "zvpxrl@znfgrevatrznpf.bet")
