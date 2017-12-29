@@ -12,7 +12,7 @@
  */
 
 #define N_MACHINES 1
-#define TREE_WIDTH 5
+#define TREE_WIDTH 3
 #define TREE_DEPTH 3
 
 #define SEQ_DEPTH 1  // low is low par threshold. low is much par
@@ -89,13 +89,13 @@ typedef struct node {
   int from_child; // I am the parent of a child, and that child scheduled me. which child was that?
   int max_of_closed_kids_ub;
   int min_of_closed_kids_lb;
-  int n_open_kids;
   int n_active_kids;
   int my_child_number;
-  int open_child[TREE_WIDTH];
   int children_at[TREE_WIDTH]; // array of number/id of machine that holds the child
+  int expanded_children[TREE_WIDTH]; // array of expandedness boolean of my children
   int live_children[TREE_WIDTH]; // array of liveness boolean of my children
-  int n_children;
+  int n_expanded_children; // n_expanded_children
+  int n_live_children; // n_expanded_children
   //  node_type *parent;
   int parent_at; // machine number that holds the parent;
   //  node_type *best_child;
@@ -247,7 +247,8 @@ void sort_queue(job_type *q[], int t);
 void print_queue(job_type *q[], int t);
 node_type *next_brother(node_type *node);
 int main(int argc, char *argv[]);
-void print_tree(node_type *node, int d);
+int *null_path();
+void print_tree(int path[], int d);
 void create_tree(int d);
 void push_job(int my_id, int home_machine, job_type *job);
 job_type *pull_job(int home_machine);
@@ -271,6 +272,7 @@ int not_empty(int top, int home);
 void process_job(int my_id, job_type *job);
 //void schedule(int my_id, node_type *node, int t);
 void do_select(node_type *node);
+void do_select2(node_type *node);
 int first_live_child(node_type *node);
 void do_playout(node_type *node);
 int evaluate(node_type *node);

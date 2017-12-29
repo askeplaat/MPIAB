@@ -163,13 +163,27 @@ int global_in_wait = 0;
 double global_unorderedness_seq_x[TREE_DEPTH];
 int global_unorderedness_seq_n[TREE_DEPTH];
 
+
+
 // return the index of the first live child
-int first_live_child(node_type *node) {
+int first_expanded_live_child(node_type *node) {
   int n = 0;
   //  printf("%d FLC: N: %d ", my_process_id, node->n_children); print_path(node->path, node->depth);
-  for (n = 0; n < node->n_children; n++) {
-    if (node->live_children[n]) {
-      //      printf("%d LIVE child %d ", my_process_id, n); print_path(node->path, node->depth);
+  // TREE_WIDTH >= n_expanded_children >= n_live_children >= 0
+  for (n = 0; n < node->n_expanded_children; n++) {
+    if (node->expanded_children[n] && node->live_children[n]) {
+      return n;
+    }
+  }
+  return NO_LIVE_CHILD;
+}
+
+
+int first_unexpanded_child(node_type *node) {
+  int n = 0;
+
+  for (n = 0; n < node->n_expanded_children; n++) {
+    if (!node->expanded_children[n]) {
       return n;
     }
   }
@@ -184,26 +198,45 @@ int first_live_child(node_type *node) {
 // but only one node at a time, since each node has its own home machine
 // precondition: my bounds 
 void do_select(node_type *node) {
+  printf("SELECT SHOULD NOT BE INVOKED\n");
+  exit(0);
   if (!node) {
     printf("ERROR: child not found in select\n");
     exit(0);
-  }
-  printf("IN SELECT. Node: %p. Live: %d\n", node, live_node(node));
-  if (node) {
+  } else /* if (live_node(node)) */ {
+    printf("IN SELECT. Node: %p. Live: %d. n_exp_children: %d;  n_live_children: %d\n", 
+	   node, live_node(node), node->n_expanded_children, node->n_live_children);
+  
+    if (node->depth == TREE_DEPTH && root != node) {
+      printf("ERROR: root != node while depth is: %d\n", node->depth);
+      exit(0);
+    }
+    if (node->depth == TREE_DEPTH) {
+      printf("SELECT ROOT root children: %d/%d\n", node->n_expanded_children, node->n_live_children);
+    }
 
-#define PRINT_SELECT
+#define PRINT_SELECT 
 #ifdef PRINT_SELECT
-    printf("M%d  %s SELECT d:%d  ---   <%d:%d>  \n", 
+    printf("M%d  %s SELECT d:%d  ---  ab <%d:%d>  lu <%d,%d>    \n", 
 	   node->board,  node->maxormin==MAXNODE?"+":"-",
 	   node->depth,
-	   node->a, node->b);
+	   node->a, node->b, node->lb, node->ub);
 #endif
     if (leaf_node(node)) { // depth == 0; frontier, do playout/eval
       do_playout(node);
     } else if (live_node(node)) {
-      int flc = first_live_child(node); // index of first_live_child
+      printf("LIVE NODE live: %d, ab: <%d,%d>, lu: <%d,%d>   ", 
+	     live_node(node), node->a, node->b, node->lb, node->ub); print_path(node->path, node->depth);
+      int flc = first_expanded_live_child(node); // index of first_live_child
       printf("FLC: %d\n", flc);
       if (flc == NO_LIVE_CHILD) {
+	/*
+no live child is dubbelzinnig. het lan betekenen no children expanded
+het kan ook betekeknen wel kinderen maar allemaal dood
+  first live child moet het eerste live child teruggeven, en als er geen zijn dan dus een expand, en als er geen geexpandeerd meer kunnen worden dan dus broer.
+dan moet ik een msg sturen dat parent naar een broer gaat
+	*/
+	// create new children; expand
 #ifdef PUO 
 	int highest_child_in_par = 0;
 	if (global_unorderedness_seq_n[node->depth]) {
@@ -217,32 +250,47 @@ void do_select(node_type *node) {
 #else
 	int highest_child_in_par = n_par;
 #endif   
-	printf("Highest child in par is %d\n", highest_child_in_par);
+      	printf("Highest child in par is %d.\n", highest_child_in_par);
 
 	int children_created = 0;
-	for (int p = 0; p < TREE_WIDTH; p++) {
+	int p ;
+	for (p = 0; p < TREE_WIDTH; p++) {
 	  if (node->live_children[p] && !seq(node)) {
-	    node->n_children ++;
 	    printf("%d CALLING CREATE CHILD (%d) AT FROM DO_SELECT node/active: %d root/active: %d   ", 
-		   my_process_id, p, node->n_active_kids, root->n_active_kids); print_path(node->path, node->depth);
-	    /*
-	    this creates a child, I really need to create a brother (same level, not a level deeper to the leaves). no, I do need to create a child, but for some reason it creates the wrong one. I am at 0.0, need to create 0.0.1, and do create 0.1.0
- the p in the argument is not passed to the new_leaf, but taken as the id of the parent
-	    */
+		   my_process_id, p, node->n_active_kids, 
+		   root->n_active_kids); print_path(node->path, node->depth);
 	    create_child_at(node, p, opposite(node));
 	    children_created++;
-	    // do not create more children in par than 
 	    if (children_created > highest_child_in_par) {
 	      break;
-	    }
-	  } // if
-	} // for
+	    } // if break
+	  } // if seq
+	} // for p
+	printf("out of for. p is %d\n", p);
+	if (!children_created) {
+	  printf("ERROR, node is selected in AB but no live or unexpanded children. n_expanded_kids: %d   ", 
+		 node->n_expanded_children); print_path(node->path, node->depth);
+	  /*	  select_brother_at(node);
+hoe kan het dat ik hier uit kom? Hoe kan het dat een dode node geselecteerd wordt?
+  als alle kids geexpandeerd zijn, dan mmoet er toch een updaet langsgekomen zijn die de node ook 
+dood gemaakt heeft?
+  well, that is not the case for MCTS. MCTS re-visits dead nodes, when they are the best.
+
+What about AB?
+	  */
+	}
       } else { // flc is existing child
-	//	printf("%d Doing select child at of child %d  ", 
-	//     my_process_id, flc); print_path(node->path, node->depth);
-	select_child_at(node, flc, opposite(node));
+	//	printf("FLC IS VALID -- ");
+	//      	printf("%d Doing select child at of child %d  ", 
+	//	     my_process_id, flc); print_path(node->path, node->depth);
+	if (node->children_at[flc] != INVALID) {
+	  select_child_at(node, flc, opposite(node));
+	} else {
+	  create_child_at(node, flc, opposite(node));
+	}
       }
     } else if (dead_node(node) && !root_node(node)) { // cutoff: alpha==beta
+      printf("DEAD NODE\n");
       // record cutoff and do this in statistics which child number caused it
       global_unorderedness_seq_x[node->depth] += (double)node->my_child_number; //child_number(node->path);
       global_unorderedness_seq_n[node->depth]++;
@@ -257,8 +305,8 @@ void do_select(node_type *node) {
 	//do we need BESTCHILD anymore? update now has a way of updating values without needing the bestchild pointer
 	//	schedule(my_id, node->parent, BESTCHILD, node);
 	// update really schdules the parent, but I do not have the parent node here, so UPDATE has to fudge something. 
-      printf("CUTOFF\n");
-      update_parent_at(node, my_process_id);
+      printf("CUTOFF update lu: <%d,%d>\n", node->lb, node->ub);
+      update_parent_at(node, node->my_child_number);
 	//	schedule(my_id, node, UPDATE, node->my_child_number, lb, ub);
 	//    }
 #endif
@@ -267,9 +315,117 @@ void do_select(node_type *node) {
 	     node->board, node->path);
       //      print_tree(root, 2);
       exit(0);
-    }
-  }
+    } // live or dead
+  } // !node or node or dead
 }
+
+void expand_new_children(node_type *node, int funexc) {
+  // create new children; expand
+#ifdef PUO 
+  int highest_child_in_par = 0;
+  if (global_unorderedness_seq_n[node->depth]) {
+    highest_child_in_par = global_unorderedness_seq_x[node->depth]/global_unorderedness_seq_n[node->depth];
+  } else {
+    highest_child_in_par = funexc;
+  }
+  if (highest_child_in_par < 1 || highest_child_in_par > TREE_WIDTH) {
+    highest_child_in_par = 1;
+  }
+#else
+  int highest_child_in_par = n_par;
+#endif   
+  printf("Highest child in par is %d.\n", highest_child_in_par);
+
+  int children_created = 0;
+  int p ;
+  for (p = 0; p < TREE_WIDTH; p++) {
+    if (node->live_children[p] && !seq(node)) {
+      printf("%d CALLING CREATE CHILD (%d) AT FROM DO_SELECT node/active: %d root/active: %d   ", 
+		   my_process_id, p, node->n_active_kids, 
+		   root->n_active_kids); print_path(node->path, node->depth);
+      create_child_at(node, p, opposite(node));
+      children_created++;
+      if (children_created > highest_child_in_par) {
+	break;
+      } // if break
+    } // if seq
+  } // for p
+  printf("out of for. p is %d\n", p);
+  if (!children_created) {
+    printf("ERROR, node is selected in AB but no live or unexpanded children. n_expanded_kids: %d   ", 
+		 node->n_expanded_children); print_path(node->path, node->depth);
+  } 
+}
+
+
+/******************************
+ *** SELECT2                ***
+ *** 1. if expanded live children, select first
+ *** 2. if unexpanded children, expand first
+ *** 3. otherwise (only dead children), update (lb/ub) of dead node
+ ******************************/
+
+// traverse to the left most deepest open node or leaf node
+// but only one node at a time, since each node has its own home machine
+// precondition: my bounds 
+void do_select2(node_type *node) {
+  if (!node) {
+    printf("ERROR: child not found in select\n");
+    exit(0);
+  }
+  
+  printf("M%d  %s SELECT d:%d  ---  ab <%d:%d>  lu <%d,%d>    \n", 
+	 node->board,  node->maxormin==MAXNODE?"+":"-",
+	 node->depth,
+	 node->a, node->b, node->lb, node->ub);
+  
+  // LEAF
+
+  if (leaf_node(node)) { // depth == 0; frontier, do playout/eval
+    do_playout(node);
+    return;
+  } 
+    
+  if (live_node(node)) {
+    printf("LIVE NODE live: %d, ab: <%d,%d>, lu: <%d,%d>   ", 
+	   live_node(node), node->a, node->b, node->lb, node->ub); print_path(node->path, node->depth);
+
+    // LIVE EXPANDED 
+
+    int felc = first_expanded_live_child(node); // index of first_live_child
+    printf("FELC: %d\n", felc);
+    if (felc != NO_LIVE_CHILD) {
+      if (node->children_at[felc] == INVALID) {
+	printf("ERROR: invalid machine at child\n");
+      }
+      select_child_at(node, felc, opposite(node));
+      return;
+    }
+
+    // UNEXPANDED
+    // no expanded live children, try unexpanded
+
+    int funexc = first_unexpanded_child(node);
+    if (funexc == NO_LIVE_CHILD) {
+      expand_new_children(node, funexc);
+      return;
+    } 
+  } else if (dead_node(node) && !root_node(node)) { // cutoff: alpha==beta
+    // no live or unexpanded children, we only have dead, return an update
+    printf("DEAD NODE\n");
+    // record cutoff and do this in statistics which child number caused it
+    global_unorderedness_seq_x[node->depth] += (double)node->my_child_number; //child_number(node->path);
+    global_unorderedness_seq_n[node->depth]++;
+
+    printf("CUTOFF update lu: <%d,%d>\n", node->lb, node->ub);
+    update_parent_at(node, node->my_child_number);
+    return;
+
+  } // live or dead
+
+} // do_select2
+
+
 
 
 /********************************
@@ -294,13 +450,13 @@ void do_expand(child_msg_type *msg) {
     printf("ERROR in Do Expand depth %d\n", msg->depth);
   }
 
-  printf("%d EXPAND: depth: %d  ", my_process_id, msg->depth); print_path(msg->path, msg->depth);
+  //  printf("%d EXPAND: depth: %d  ", my_process_id, msg->depth); print_path(msg->path, msg->depth);
 
   node_type *node = lookup(msg->path, msg->depth);
 
   // receiver must store parent-at, and copy wa wb
 
-  printf("EXPAND. childnumber is: %d while path is ", msg->child_number); print_path(msg->path, msg->depth);
+  //  printf("EXPAND. childnumber is: %d while path is ", msg->child_number); print_path(msg->path, msg->depth);
   if (!node) {
     // existing nodes are not created
     // exisitng nodes are traveersed, and then SELECT?
@@ -312,6 +468,11 @@ void do_expand(child_msg_type *msg) {
     node->parent_at = msg->parent_at;
     node->path = msg->path;
     //    printf("Storing node "); print_path(node->path, node->depth);
+    if (node->depth == TREE_DEPTH - 1) {
+      printf("Setting as Root %d   ", node->depth); print_path(node->path, node->depth);
+      root = node;
+    }
+
     store(node);
   }  else {
     printf("Node existed "); print_path(node->path, node->depth);
@@ -322,7 +483,7 @@ void do_expand(child_msg_type *msg) {
 
   if (live_node(node)) {
     //    schedule(my_id, node, SELECT, NO_ARG);
-    do_select(node); // at same machine
+    do_select2(node); // at same machine
   }
 }
 
@@ -333,6 +494,9 @@ void do_expand(child_msg_type *msg) {
 
 // just std ab evaluation. no mcts playout
 void do_playout(node_type *node) {
+  if (!node || !live_node(node)) {
+      return;
+  }
   node->a = node->b = node->lb = node->ub = evaluate(node);
   
   printf("M%d PLAYOUT d:%d    A:%d    ", 
@@ -345,7 +509,7 @@ void do_playout(node_type *node) {
     //    set_best_child(node);
     //    node->parent->best_child = node;
     //    schedule(my_id, node->parent, UPDATE, {int from_me = my_id}, node->lb, node->ub);
-  update_parent_at(node, my_process_id);
+  update_parent_at(node, node->my_child_number);
     //  }
 }
 
@@ -368,8 +532,8 @@ void do_update(parent_msg_type *msg) {
     printf("ERROR in Do Update depth %d\n", msg->depth);
   }
   node_type *node = lookup(msg->path, msg->depth);
-  if (!node) {
-    printf("ERROR: parent not found in update --  "); print_path(msg->path, msg->depth);
+  if (!node || !live_node(node) ) {
+    printf("ERROR: parent not found in update or not live --  "); print_path(msg->path, msg->depth);
     //    exit(0);
     return;
   }
@@ -383,9 +547,10 @@ void do_update(parent_msg_type *msg) {
     printf("***************************************************************************************UPDATING ROOT\n");
   }
 
-  printf("%d UPDATE from:%d, lb:%d, ub:%d mm:%d, d:%d, active:%d root/active:%d\n", 
+  printf("%d UPDATE from:%d, lb:%d, ub:%d mm:%d, d:%d, active:%d root/active:%d   ", 
 	 node->path, from_child_number, lb_of_child, ub_of_child, node->maxormin, 
 	 node->depth, node->n_active_kids, root->n_active_kids);
+  print_path(node->path, node->depth);
 
   if (node) {
     int continue_updating = 0;
@@ -394,39 +559,45 @@ void do_update(parent_msg_type *msg) {
     
     //    global_updates[node->board]++;
 
+    printf("N_EXPANDED_KIDS is %d.  msg-child_live: %d. from_child: %d. live[from_child]: %d  lu: <%d,%d>", 
+	   node->n_expanded_children, msg->child_live, from_child_number, node->live_children[from_child_number], lb_of_child, ub_of_child); 
+    print_path(node->path, node->depth);
+    /*
+management of open kids/expanded children
+is now done in create_child_at
+
+    // if was live and now dead, so decr n_open_kids
+    if (node->n_expanded_children < TREE_WIDTH &&
+	node->live_children[from_child_number] && !msg->child_live) {
+	node->n_expanded_children ++;
+	printf("N_EXPANDED_KIDS updated to %d  ", node->n_expanded_children); print_path(node->path, node->depth);
+    }
+    */
+
     if (node->maxormin == MAXNODE) {
-      //      I think that we should only update lb/ub. a/b should not be updated bottom up, only be passed in top down
-	//      int old_a = node->a;
-	//      node->a = max(node->a, node->best_child->a);
-	//      node->b = max_of_beta_kids(node); //  infty if unexpanded kids
       // if we have expanded a full max node, then a beta has been found, which should be propagated upwards to my min parenr
-      //      node->lb = max(node->lb, node->best_child->lb);
-      //      node->ub = max_of_ub_kids(node);
-      // keep track of open children
-      if (node->open_child[from_child_number]) {
-	node->n_open_kids --;
-	node->open_child[from_child_number] = FALSE;
-      }
       node->lb = max(node->lb, lb_of_child);
       node->max_of_closed_kids_ub = max(node->max_of_closed_kids_ub, ub_of_child);
-      node->ub = node->n_open_kids > 0 ? INFTY : node->max_of_closed_kids_ub;
+      node->ub = node->n_expanded_children < TREE_WIDTH ? INFTY : node->max_of_closed_kids_ub;
       continue_updating = (node->ub != INFTY || node->lb != old_lb);
+      printf("%d continue update %d  child %d lu: <%d,%d> m-m+: <%d,%d>\n", 
+	     node->path, continue_updating, node->my_child_number, node->lb, node->ub, node->min_of_closed_kids_lb, node->max_of_closed_kids_ub);
     }
     if (node->maxormin == MINNODE) {
-      //      node->a = min_of_alpha_kids(node);
-      //      int old_b = node->b;
-      //      node->b = min(node->b, node->best_child->b);
       node->ub = min(node->ub, ub_of_child);
       node->min_of_closed_kids_lb = min(node->min_of_closed_kids_lb, lb_of_child);
-      node->lb = node->n_open_kids > 0 ? -INFTY : node->min_of_closed_kids_lb;
+      node->lb = node->n_expanded_children < TREE_WIDTH ? -INFTY : node->min_of_closed_kids_lb;
       continue_updating = (node->lb != -INFTY || node->ub != old_ub); // if a full min node has been expanded, then an alpha has been bound, and we should propagate it to the max parent
+      printf("%d continue update %d  child %d lu: <%d,%d> m-m+: <%d,%d>\n", 
+	     node->path, continue_updating, node->my_child_number, node->lb, node->ub, node->min_of_closed_kids_lb, node->max_of_closed_kids_ub);
     }
     
     node->live_children[from_child_number] = msg->child_live;
+    printf("Setting child %d node to live: %d  ", from_child_number, msg->child_live); print_path(node->path, node->depth);
     //node->lb < node->ub; dit klopt niet. dit is of de huidige node live is. niet het kind.
 
-    printf("Continue update is %d. lb: %d, ub: %d, oldlb:%d, oldub:%d live: %d\n", 
-	   continue_updating, node->lb, node->ub, old_lb, old_ub, msg->child_live);
+    //    //    printf("Continue update is %d. lb: %d, ub: %d, oldlb:%d, oldub:%d live: %d\n", 
+    //	   continue_updating, node->lb, node->ub, old_lb, old_ub, msg->child_live);
 
     //    if (node == root) {
     //      printf("Updating root <%d:%d>\n", node->a, node->b);
@@ -436,7 +607,7 @@ void do_update(parent_msg_type *msg) {
       // schedule downward update to parallel searches
       // downward_update_children(node);
       //      so downard update is scheduled for all children, irregardless of theire existence. also for non-expanded children
-      for (int ch = 0; ch < node->n_children; ch++) {
+      for (int ch = 0; ch < node->n_expanded_children; ch++) {
 	if (node->live_children[ch]) {
 	  printf("Updating live child %d for node  ", ch); print_path(node->path, node->depth);
 	  update_child_at(node, ch);
@@ -447,15 +618,15 @@ void do_update(parent_msg_type *msg) {
 	//	if (node->parent->best_child) {
 	//	set_best_child(node);
 	//	} 
-	//      	printf("%d schedule update %d\n", node->path, node->parent->path);
-	//	schedule(my_id, node->parent, UPDATE, from_me, lb, ub);
-      update_parent_at(node, my_process_id);
+      printf("%d schedule further parent update %d <%d,%d>\n", node->path, node->my_child_number, node->lb, node->ub);
+      update_parent_at(node, node->my_child_number);
 	//      }
     } else {
       decr_active_root();
       // keep going, no longer autmatic select of root. select of this node
       //      schedule(node, SELECT);
     }
+    print_tree(root->path, TREE_DEPTH);
   }
 }
 
@@ -467,9 +638,10 @@ void downward_update_children(update_msg_type *msg) {
     printf("ERROR in Do downward depth %d\n", msg->depth);
   }
   node_type *node = lookup(msg->path, msg->depth);
-  if (!node) {
-    printf("ERROR: child not found in update\n"); print_path(msg->path, msg->depth);
-    exit(0);
+  if (!node || !live_node(node)) {
+    printf("ERROR: child not found in update or not live\n"); print_path(msg->path, msg->depth);
+    return; 
+    //    exit(0);
   }
 
   int a_of_parent = msg->a;
@@ -484,8 +656,10 @@ void downward_update_children(update_msg_type *msg) {
     node->b = min(b_of_parent, node->b);
     
     if (continue_update) {
-      for (int ch = 0; ch < node->n_children; ch++) {
-	update_child_at(node, ch);
+      for (int ch = 0; ch < node->n_expanded_children; ch++) {
+	if (node->live_children[ch]) {
+	  update_child_at(node, ch);
+	}
       }
     }
   }

@@ -82,9 +82,9 @@ int random_table[RANDOM_TABLE_SIZE];
 
 
 void check_paths(int p1[], int p2[], int d) {
-  for (int i = 0; i < TREE_DEPTH; i++) {
+  for (int i = TREE_DEPTH-1; i >= d; i--) {
     if (p1[i] != p2[i]) {
-      printf("ERROR path mismatch:\n");
+      printf("ERROR path mismatch(%d): %d,%d. d:%d\n", i, p1[i], p2[i], d);
       print_path(p1, d);
       print_path(p2, d);
     }
@@ -97,14 +97,14 @@ void check_paths(int p1[], int p2[], int d) {
 // depth = 0 for leaves
 // depth = big at root
 int hash(int path[], int depth) {
-  print_path(path, depth);
+  //  print_path(path, depth);
   //  int h = 0;
-  int h = depth * 1234567L;
+  unsigned int h = depth * 1234567L;
   for (int i = TREE_DEPTH-1; i >= depth; i--) {
     //  for (int i = depth; i >= 0; i--) {
-    printf("HASH(%d): %d\n", i, path[i]);
+    //    printf("HASH(%d): %d\n", i, path[i]);
     h ^= random_table[path[i]];
-    h %= 748291034753L;
+    h = h * 74829153L;
   }
   /*
   hmm. with this hash function, [0,0,0] hashes to the same value as [0,0,0,0]. this is not good.
@@ -123,22 +123,27 @@ node_type *lookup(int path[], int depth) {
     printf("ERROR. Depth out of bounds %d    ", depth); print_path(path, depth);
     exit(0);
   }
-  printf("\nLOOKUP(%d)   ", depth); print_path(path, depth);
+
   int entry = hash(path, depth);
+  //  printf("\nLOOKUP(%d)  entry: %d ", depth, entry); print_path(path, depth);
   if (hash_table[entry].key == entry) {
     node_type *node = hash_table[entry].node;
-    printf("Matching hashkey; Returning Node 0x%x key: 0x%x  depth: %d. node-depth: %d     ", 
-	   node, entry, depth, node->depth); print_path(path, depth);
+    //    printf("Matching hashkey; Returning Node 0x%x key: 0x%x  depth: %d. node-depth: %d     ", 
+    //	   node, entry, depth, node->depth); print_path(path, depth);
     check_paths(path, node->path, depth);
     return node;
   } else {
-    printf("NULL: entry: 0x%x  key: 0x%x\n", entry, hash_table[entry].key);
+    //    printf("NULL: entry: 0x%x  key: 0x%x\n", entry, hash_table[entry].key);
     return NULL;
   }
 }
 
 void store(node_type *node) {
   int entry = hash(node->path, node->depth);
+  //  printf("Storing in %d ", entry); print_path(node->path, node->depth);
+  if (hash_table[entry].node != (node_type *) INVALID) {
+    printf("OVERWRITING HASH ENTRY\n");
+  }
   hash_table[entry].key  = entry;
   hash_table[entry].node = node;
 }
@@ -186,12 +191,13 @@ node_type *new_leaf(child_msg_type *msg, int ch, int mm) {
   node->from_child = -1; // I was scheduled by a child, whose parent I am, and that child was number xx, this is used in UPDATE, to record which children are open
   node->my_child_number = ch; // child number of my parent that I am
   //  node->children =  NULL;
-  node->n_children = 0;
+  node->n_live_children = TREE_WIDTH;
+  node->n_expanded_children = 0;
   node->n_active_kids = 0;
-  node->n_open_kids = TREE_WIDTH;
   for (int i= 0; i < TREE_WIDTH; i++) {
-    node->open_child[i] = TRUE;
+    node->expanded_children[i] = FALSE;
     node->live_children[i] = TRUE;
+    node->children_at[i] = INVALID;
   }
   node->max_of_closed_kids_ub = -INFTY;
   node->min_of_closed_kids_lb = INFTY;
@@ -353,17 +359,24 @@ int opposite(node_type *node) {
   return (node->maxormin==MAXNODE) ? MINNODE : MAXNODE;
 }
 
-/*
-void print_tree(node_type *node, int d) {
+
+void print_tree(int path[], int d) {
+  node_type *node = lookup(path, d);
   if (node && d >= 0) {
-    printf("%d: %d %s <%d,%d>\n",
-	   node->depth, node->path, ((node->maxormin==MAXNODE)?"+":"-"), node->a, node->b);
-    for (int ch = 0; ch < node->n_children; ch++) {
-      print_tree(node->children[ch], d-1);
+    printf("%d: %d %d ab: <%d,%d>  wab: <%d,%d>  lu:<%d,%d> livekids: ",
+	   node->depth, node->my_child_number, ((node->maxormin==MAXNODE)?"+":"-"), 
+	   node->a, node->b, node->wa, node->wb, node->lb, node->ub);
+    for (int ch = 0; ch < node->n_expanded_children; ch++) {
+      printf("%d/%d ", node->expanded_children[ch], node->live_children[ch]);
+    }
+    printf("\n");
+    for (int ch = 0; ch < node->n_expanded_children; ch++) {
+      path[d-1] = ch;
+      print_tree(path, d-1);
     }
   }
 }
-*/
+
 
 int my_process_id = -1;
 int world_size = 0;
@@ -400,7 +413,7 @@ int main(int argc, char *argv[]) {
 
   for (int i = 0; i < HASH_TABLE_SIZE; i++) {
     hash_table[i].key = INVALID;
-    hash_table[i].node = INVALID;
+    hash_table[i].node = (node_type *)INVALID;
   }
 
 #ifndef MSGPASS
@@ -444,7 +457,7 @@ int main(int argc, char *argv[]) {
 
 
   // attach gdb
-  /*  
+    /*  
   {  
   int i = 0;
     char hostname[256];
@@ -455,7 +468,7 @@ int main(int argc, char *argv[]) {
       sleep(5);
     }
   }
-  */
+    */
   
 #else
   int numWorkers = __cilkrts_get_nworkers();
@@ -468,6 +481,8 @@ int main(int argc, char *argv[]) {
   if (my_process_id == 0) {
     if (!root) {
       create_tree(TREE_DEPTH);// aha! each alphabeta always creates new tree!
+      root->path = null_path();
+      store(root);
     }
     
     if (strcmp(alg_choice, "w") == 0) {
@@ -549,13 +564,13 @@ void print_queues() {
 int start_alphabeta(int a, int b) {
   root->wa = a; // store bounds in passed-down window alpha/beta
   root->wb = b;
-#ifndef MSGPASS
-  schedule(root->board, root, SELECT);
-  flush_buffer(root->board, root->board);
-#else
+
+  //   print_tree(root->path, TREE_DEPTH);
+
+
   printf("CALLING CREATE_CHILD_AT FROM START_ALPHABETA\n");;
-  create_child_at(root, 0, MAXNODE);
-#endif
+  create_child_at(root, 0, MAXNODE);// it is creating a child of the root, not the root with the children, but now the child will have the children
+
   start_processes(N_MACHINES);
   return root->ub >= b ? root->lb : root->ub;
   // dit moet een return value zijn buiten het window. fail soft ab
@@ -583,6 +598,12 @@ int start_mtdf() {
 
 
 
+int maxxx(int x1, int x2, int x3) {
+  return max(max(x1, x2), max(x2, x3));
+}
+int minnn(int x1, int x2, int x3) {
+  return min(min(x1, x2), min(x2, x3));
+}
 
 
 /***************************
@@ -594,7 +615,8 @@ int leaf_node(node_type *node) {
 }
 int live_node(node_type *node) {
   //  return node && node->lb < node->ub; // alpha beta???? window is live. may be open or closed
-  return node && max(node->wa, node->a) < min(node->wb, node->b); // alpha beta???? window is live. may be open or closed
+  return node && maxxx(node->wa, node->a, node->lb) < minnn(node->wb, node->b, node->ub); // alpha beta???? window is live. may be open or closed
+  // return node && max(node->wa, node->a) < min(node->wb, node->b); // alpha beta???? window is live. may be open or closed
 }
 
 int live_node_lbub(node_type *node) {
