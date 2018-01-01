@@ -106,7 +106,8 @@ void msg_dispatch(child_msg_type *msg, int from) {
 	//	printf("%d Expanding ", my_process_id); print_path(msg->path, msg->depth);
 	do_expand((child_msg_type *)msg);
       } else if (msg->msg_type == SELECT_CHILD_AT) {
-	//	printf("%d Selecting ", my_process_id); print_path(msg->path, msg->depth); // path is alwyas [0,0,0,0] so lways the samen node is selected. the leftfirst leaf....
+       	printf("%d Selecting child %d depth: %d ", my_process_id, msg->child_number, msg->depth); 
+	print_path(msg->path, msg->depth); // path is alwyas [0,0,0,0] so lways the samen node is selected. the leftfirst leaf....
 	if (msg->depth <0 || msg->depth > TREE_DEPTH) {
 	  printf("ERROR in Dispatch depth %d\n", msg->depth);
 	}
@@ -148,15 +149,15 @@ void do_work_queue(int i) {
   int safety_counter = SAFETY_COUNTER_INIT;
   global_empty_machines = world_size;
 
-
+  printf("WORK QUEUE START: Root depth is %d\n", root->depth);
 
   while (safety_counter-- > 0 && !global_done && live_node(root)) { 
     job_type *job = NULL;
 
     //    printf("%d active kids: %d\n", my_process_id, root->n_active_kids);
     print_path(root->path, TREE_DEPTH);
-    printf("Root values: expanded_children: %d live_children: %d lu: <%d,%d>\n", 
-	   root->n_expanded_children, root->n_live_children, root->lb, root->ub);
+    printf("Root (depth: %d) values: expanded_children: %d live_children: %d lu: <%d,%d>\n", 
+	   root->depth, root->n_expanded_children, root->n_live_children, root->lb, root->ub);
     //    root->n_children++;
     //    printf("Root children: %d\n", root->n_children);
     //    printf("PRINT_TREE: ");
@@ -166,18 +167,22 @@ void do_work_queue(int i) {
     if (i == root->board && live_node(root) && root->n_active_kids == 0) {
       //     printf("* globalempty machines: %d\n", global_empty_machines);
 
-      printf("%d CALLING SELECT_CHILD_AT FROM EMPTY WORKQUEUE at root. n_active: %d\n", 
-	     my_process_id, root->n_active_kids);
+      printf("%d CALLING SELECT_CHILD_AT FROM EMPTY WORKQUEUE at root. n_active: %d. n_expanded: %d. n_live: %d  ", 
+	     my_process_id, root->n_active_kids, root->n_expanded_children, root->n_live_children);
       int ch = 0;
-      for (ch = 0; ch < root->n_expanded_children; ch++) {
+      for (ch = 0; ch < TREE_WIDTH; ch++) {
 	if (!root->expanded_children[ch]) {
-	  create_child_at(root, ch, MAXNODE); 
+	  printf("Depth: %d CREATE CHILD %d\n", root->depth, ch);
+	  create_child_at(root, ch, MINNODE); 
+	  break;
 	} else if (root->live_children[ch]) {
-	  select_child_at(root, ch, MAXNODE); 
+	  printf("Depth: %d SELECT CHILD %d\n", root->depth, ch);
+	  select_child_at(root, ch, MINNODE); 
+	  break;
 	}
       }
-      if (ch >= root->n_expanded_children) {
-	printf("ERROR: NO LIVE KIDS IN ROOT\n");
+      if (ch > TREE_WIDTH) {
+	printf("ERROR: NO LIVE KIDS IN ROOT. ch: %d. expanded_children: %d\n", ch, root->n_expanded_children);
 	exit(0);
       }
     }
@@ -316,7 +321,8 @@ void select_child_at(node_type *node, int child_number, int mm) {
   child_msg.parent_at = my_process_id;
 
   //  do_nonidle_machine(home_machine);
-  printf("MPISEND %d select sending CHILD %d to %d\n", my_process_id, child_number, home_machine);
+  printf("MPISEND %d select sending CHILD %d to %d  ", my_process_id, child_number, home_machine);
+  print_path(child_msg.path, child_msg.depth);
 
   // the idea to only send the pointer, not the full node.
   MPI_Send(&child_msg, sizeof(child_msg_type), MPI_BYTE, home_machine, 0, MPI_COMM_WORLD);
@@ -344,7 +350,11 @@ void update_parent_at(node_type *node, int from_child_id) {
   //should be parent's active kid number that is decremented.' 
   parent_msg.from_child = from_child_id;
   parent_msg.depth = node->depth +1;
-  parent_msg.child_live = node->lb < node->ub;
+  int old_live = node->live_children[from_child_id];
+  int new_live = parent_msg.child_live = node->lb < node->ub;
+  if (old_live && !new_live) {
+    node->n_live_children--;
+  }
   parent_msg.lb = node->lb;
   parent_msg.ub = node->ub;
   parent_msg.mm = opposite(node);

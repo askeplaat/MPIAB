@@ -267,9 +267,13 @@ dan moet ik een msg sturen dat parent naar een broer gaat
 	  } // if seq
 	} // for p
 	printf("out of for. p is %d\n", p);
+	print_tree(root->path, TREE_DEPTH);
 	if (!children_created) {
 	  printf("ERROR, node is selected in AB but no live or unexpanded children. n_expanded_kids: %d   ", 
 		 node->n_expanded_children); print_path(node->path, node->depth);
+	  print_path(node->path, node->depth);
+	  print_tree(root->path, TREE_DEPTH);
+	  fflush(stdout);
 	  /*	  select_brother_at(node);
 hoe kan het dat ik hier uit kom? Hoe kan het dat een dode node geselecteerd wordt?
   als alle kids geexpandeerd zijn, dan mmoet er toch een updaet langsgekomen zijn die de node ook 
@@ -339,7 +343,7 @@ void expand_new_children(node_type *node, int funexc) {
   int children_created = 0;
   int p ;
   for (p = 0; p < TREE_WIDTH; p++) {
-    if (node->live_children[p] && !seq(node)) {
+    if (!node->expanded_children[p] && !seq(node)) {
       printf("%d CALLING CREATE CHILD (%d) AT FROM DO_SELECT node/active: %d root/active: %d   ", 
 		   my_process_id, p, node->n_active_kids, 
 		   root->n_active_kids); print_path(node->path, node->depth);
@@ -352,8 +356,10 @@ void expand_new_children(node_type *node, int funexc) {
   } // for p
   printf("out of for. p is %d\n", p);
   if (!children_created) {
-    printf("ERROR, node is selected in AB but no live or unexpanded children. n_expanded_kids: %d   ", 
-		 node->n_expanded_children); print_path(node->path, node->depth);
+    printf("ERROR, node is selected in AB but no live or unexpanded children. n_expanded_kids: %d, rootdepth: %d, nodedepth: %d  ", 
+	   node->n_expanded_children, root->depth, node->depth); print_path(node->path, node->depth);
+    print_path(node->path, node->depth);
+    print_tree(root->path, TREE_DEPTH);
   } 
 }
 
@@ -374,7 +380,7 @@ void do_select2(node_type *node) {
     exit(0);
   }
   
-  printf("M%d  %s SELECT d:%d  ---  ab <%d:%d>  lu <%d,%d>    \n", 
+  printf("M%d  %s SELECT2 d:%d  ---  ab <%d:%d>  lu <%d,%d>    \n", 
 	 node->board,  node->maxormin==MAXNODE?"+":"-",
 	 node->depth,
 	 node->a, node->b, node->lb, node->ub);
@@ -393,7 +399,7 @@ void do_select2(node_type *node) {
     // LIVE EXPANDED 
 
     int felc = first_expanded_live_child(node); // index of first_live_child
-    printf("FELC: %d\n", felc);
+    printf("FELC: %d depth: %d   ", felc, node->depth); print_path(node->path, node->depth);
     if (felc != NO_LIVE_CHILD) {
       if (node->children_at[felc] == INVALID) {
 	printf("ERROR: invalid machine at child\n");
@@ -456,7 +462,6 @@ void do_expand(child_msg_type *msg) {
 
   // receiver must store parent-at, and copy wa wb
 
-  //  printf("EXPAND. childnumber is: %d while path is ", msg->child_number); print_path(msg->path, msg->depth);
   if (!node) {
     // existing nodes are not created
     // exisitng nodes are traveersed, and then SELECT?
@@ -465,14 +470,17 @@ void do_expand(child_msg_type *msg) {
     if (!node) {
       printf("NEW LEAF returned null\n");
     }
+    printf("EXPAND depth: %d:%d. childnumber is: %d while path is ", msg->depth, node->depth, msg->child_number); print_path(msg->path, msg->depth);
+
     node->parent_at = msg->parent_at;
     node->path = msg->path;
-    //    printf("Storing node "); print_path(node->path, node->depth);
-    if (node->depth == TREE_DEPTH - 1) {
+    printf("Storing node "); print_path(node->path, node->depth);
+    /*
+    if (node->depth == TREE_DEPTH) {
       printf("Setting as Root %d   ", node->depth); print_path(node->path, node->depth);
       root = node;
     }
-
+    */
     store(node);
   }  else {
     printf("Node existed "); print_path(node->path, node->depth);
@@ -511,6 +519,7 @@ void do_playout(node_type *node) {
     //    schedule(my_id, node->parent, UPDATE, {int from_me = my_id}, node->lb, node->ub);
   update_parent_at(node, node->my_child_number);
     //  }
+
 }
 
 int evaluate(node_type *node) {
@@ -539,8 +548,10 @@ void do_update(parent_msg_type *msg) {
   }
   node->depth = msg->depth;
   int from_child_number = msg->from_child;
-  int lb_of_child = msg->lb;
-  int ub_of_child = msg->ub;
+  int old_lb = node->lb_of_child[from_child_number];
+  int old_ub = node->ub_of_child[from_child_number];
+  int lb_of_child =  node->lb_of_child[from_child_number] = msg->lb;
+  int ub_of_child =  node->ub_of_child[from_child_number] = msg->ub;
   node->maxormin = msg->mm;
   node->n_active_kids--;
   if (node == root) {
@@ -554,8 +565,6 @@ void do_update(parent_msg_type *msg) {
 
   if (node) {
     int continue_updating = 0;
-    int old_lb = node->lb;
-    int old_ub = node->ub;
     
     //    global_updates[node->board]++;
 
@@ -577,17 +586,27 @@ is now done in create_child_at
     if (node->maxormin == MAXNODE) {
       // if we have expanded a full max node, then a beta has been found, which should be propagated upwards to my min parenr
       node->lb = max(node->lb, lb_of_child);
+      /*
+      //      node->max_of_closed_kids_lb = max(node->max_of_closed_kids_lb, lb_of_child);
       node->max_of_closed_kids_ub = max(node->max_of_closed_kids_ub, ub_of_child);
+      node->lb = node->n_expanded_children < TREE_WIDTH ? INFTY : node->lb;
       node->ub = node->n_expanded_children < TREE_WIDTH ? INFTY : node->max_of_closed_kids_ub;
-      continue_updating = (node->ub != INFTY || node->lb != old_lb);
+      */
+      node->ub = max_of_kids(node->ub_of_child);
+
       printf("%d continue update %d  child %d lu: <%d,%d> m-m+: <%d,%d>\n", 
 	     node->path, continue_updating, node->my_child_number, node->lb, node->ub, node->min_of_closed_kids_lb, node->max_of_closed_kids_ub);
     }
     if (node->maxormin == MINNODE) {
       node->ub = min(node->ub, ub_of_child);
+      /*
       node->min_of_closed_kids_lb = min(node->min_of_closed_kids_lb, lb_of_child);
+      //      node->min_of_closed_kids_ub = min(node->min_of_closed_kids_ub, ub_of_child);
       node->lb = node->n_expanded_children < TREE_WIDTH ? -INFTY : node->min_of_closed_kids_lb;
-      continue_updating = (node->lb != -INFTY || node->ub != old_ub); // if a full min node has been expanded, then an alpha has been bound, and we should propagate it to the max parent
+      node->ub = node->n_expanded_children < TREE_WIDTH ? -INFTY : node->ub;
+      */
+      node->lb = min_of_kids(node->lb_of_child);
+
       printf("%d continue update %d  child %d lu: <%d,%d> m-m+: <%d,%d>\n", 
 	     node->path, continue_updating, node->my_child_number, node->lb, node->ub, node->min_of_closed_kids_lb, node->max_of_closed_kids_ub);
     }
@@ -603,6 +622,7 @@ is now done in create_child_at
     //      printf("Updating root <%d:%d>\n", node->a, node->b);
     //    }
     
+    continue_updating = (node->ub != old_ub || node->lb != old_lb);
     if (continue_updating) {
       // schedule downward update to parallel searches
       // downward_update_children(node);

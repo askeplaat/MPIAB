@@ -92,11 +92,24 @@ void check_paths(int p1[], int p2[], int d) {
 }
 
 
+unsigned int hash(int path[], int depth) {
+  unsigned int h = 1;
+  for (int i = TREE_DEPTH-1; i >= depth; i--) {
+    h *= TREE_WIDTH;
+    h += path[i];
+    //    printf("hash: %d\n", h);
+  }
+  h *= TREE_DEPTH;
+  h += depth+1;
+  h =  h%HASH_TABLE_SIZE;
+  //  printf("hash =  %d\n", h);
+  return h;
+}
 
 
 // depth = 0 for leaves
 // depth = big at root
-int hash(int path[], int depth) {
+unsigned int hash2(int path[], int depth) {
   //  print_path(path, depth);
   //  int h = 0;
   unsigned int h = depth * 1234567L;
@@ -131,6 +144,14 @@ node_type *lookup(int path[], int depth) {
     //    printf("Matching hashkey; Returning Node 0x%x key: 0x%x  depth: %d. node-depth: %d     ", 
     //	   node, entry, depth, node->depth); print_path(path, depth);
     check_paths(path, node->path, depth);
+    if (node->depth != depth) {
+      printf("ERROR: depth mismatch in lookup %d %d. hash: %d. node: 0x%p\n", 
+	     node->depth, depth, entry, node);
+      printf("Node: ab: <%d,%d> wab: <%d,%d>. lu: <%d,%d>, depth: %d, mm: %d  ", 
+	     node->a, node->b, node->wa, node->wb, node->lb, node->ub, node-> depth, node->maxormin);
+      print_path(node->path, depth);
+      exit(1);
+    }	
     return node;
   } else {
     //    printf("NULL: entry: 0x%x  key: 0x%x\n", entry, hash_table[entry].key);
@@ -198,9 +219,13 @@ node_type *new_leaf(child_msg_type *msg, int ch, int mm) {
     node->expanded_children[i] = FALSE;
     node->live_children[i] = TRUE;
     node->children_at[i] = INVALID;
+    node->lb_of_child[i] = -INFTY;
+    node->ub_of_child[i] = INFTY;
   }
   node->max_of_closed_kids_ub = -INFTY;
   node->min_of_closed_kids_lb = INFTY;
+  //  node->max_of_closed_kids_lb = -INFTY;
+  //  node->min_of_closed_kids_ub = INFTY;
   //  node->parent_path = p->path;
   //  node->best_child = NULL;
   //  node->path = 10 * parent->path + ch + 1;;
@@ -363,13 +388,14 @@ int opposite(node_type *node) {
 void print_tree(int path[], int d) {
   node_type *node = lookup(path, d);
   if (node && d >= 0) {
-    printf("%d: %d %d ab: <%d,%d>  wab: <%d,%d>  lu:<%d,%d> livekids: ",
+    printf("%d: %d %d ab: <%d,%d>  wab: <%d,%d> lu:<%d,%d> ne: %d/nl: %d. e/l: ",
 	   node->depth, node->my_child_number, ((node->maxormin==MAXNODE)?"+":"-"), 
-	   node->a, node->b, node->wa, node->wb, node->lb, node->ub);
+	   node->a, node->b, node->wa, node->wb,
+	   node->lb, node->ub, node->n_expanded_children, node->n_live_children);
     for (int ch = 0; ch < node->n_expanded_children; ch++) {
       printf("%d/%d ", node->expanded_children[ch], node->live_children[ch]);
     }
-    printf("\n");
+    print_path(node->path, node->depth);
     for (int ch = 0; ch < node->n_expanded_children; ch++) {
       path[d-1] = ch;
       print_tree(path, d-1);
@@ -387,6 +413,33 @@ int world_size = 0;
  ***************************/
 
 int main(int argc, char *argv[]) { 
+  /*
+  int path[3];
+  path[0] = 0;
+  path[1] = 0;
+  path[2] = 0;
+  printf("Hash2: 000 = %d\n", hash(path, 0));
+  printf("Hash2: 00 = %d\n", hash(path, 1));
+
+  path[0] = 1;
+  path[1] = 0;
+  path[2] = 0;
+  printf("Hash2: 001 = %d\n", hash(path, 0));
+  path[0] = 2;
+  path[1] = 0;
+  path[2] = 0;
+  printf("Hash2: 002 = %d\n", hash(path, 0));
+  path[0] = 2;
+  path[1] = 1;
+  path[2] = 0;
+  printf("Hash2: 012 = %d\n", hash(path, 0));
+  path[0] = 1;
+  path[1] = 1;
+  path[2] = 2;
+  printf("Hash2: 011 = %d\n", hash(path, 0));
+  return;
+  */
+
   int g = -INFTY;
   if (argc != 3) {
     printf("Usage: %s {w,n,m} n-par\n", argv[0]);
@@ -449,7 +502,6 @@ int main(int argc, char *argv[]) {
     global_unorderedness_seq_n[i] = 1;
   }
 
-#ifdef MSGPASS
   MPI_Init(NULL, NULL);
   MPI_Comm_rank(MPI_COMM_WORLD, &my_process_id);
   MPI_Comm_size(MPI_COMM_WORLD, &world_size);
@@ -470,11 +522,6 @@ int main(int argc, char *argv[]) {
   }
     */
   
-#else
-  int numWorkers = __cilkrts_get_nworkers();
-  printf("CILK has %d worker threads\n", numWorkers);
-#endif
-
   /* 
    * process algorithms
    */
@@ -485,6 +532,8 @@ int main(int argc, char *argv[]) {
       store(root);
     }
     
+    printf("MAIN root created. depth: %d\n", root->depth);
+
     if (strcmp(alg_choice, "w") == 0) {
       printf("Wide-window Alphabeta\n");
       g = start_alphabeta(-INFTY, INFTY);
@@ -568,8 +617,8 @@ int start_alphabeta(int a, int b) {
   //   print_tree(root->path, TREE_DEPTH);
 
 
-  printf("CALLING CREATE_CHILD_AT FROM START_ALPHABETA\n");;
-  create_child_at(root, 0, MAXNODE);// it is creating a child of the root, not the root with the children, but now the child will have the children
+  printf("CALLING CREATE_CHILD_AT FROM START_ALPHABETA root depth: %d\n", root->depth);
+  //  create_child_at(root, 0, MAXNODE);// it is creating a child of the root, not the root with the children, but now the child will have the children
 
   start_processes(N_MACHINES);
   return root->ub >= b ? root->lb : root->ub;
@@ -603,6 +652,21 @@ int maxxx(int x1, int x2, int x3) {
 }
 int minnn(int x1, int x2, int x3) {
   return min(min(x1, x2), min(x2, x3));
+}
+
+int max_of_kids(int *a) {
+  int m = -INFTY;
+  for (int i = 0; i < TREE_WIDTH; i++) {
+    m = max(m, a[i]);
+  }
+  return m;
+}
+int min_of_kids(int *a) {
+  int m = INFTY;
+  for (int i = 0; i < TREE_WIDTH; i++) {
+    m = min(m, a[i]);
+  }
+  return m;
 }
 
 

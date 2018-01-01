@@ -20,7 +20,7 @@
 #define N_JOBS 500000 
 #define BUFFER_SIZE 100
 
-#define HASH_TABLE_SIZE 1024*1024
+#define HASH_TABLE_SIZE (1024*1024)
 
 #define INFTY  99999
 
@@ -89,8 +89,12 @@ typedef struct node {
   int from_child; // I am the parent of a child, and that child scheduled me. which child was that?
   int max_of_closed_kids_ub;
   int min_of_closed_kids_lb;
+  //  int max_of_closed_kids_lb;
+  //  int min_of_closed_kids_ub;
   int n_active_kids;
   int my_child_number;
+  int lb_of_child[TREE_WIDTH];
+  int ub_of_child[TREE_WIDTH];
   int children_at[TREE_WIDTH]; // array of number/id of machine that holds the child
   int expanded_children[TREE_WIDTH]; // array of expandedness boolean of my children
   int live_children[TREE_WIDTH]; // array of liveness boolean of my children
@@ -229,9 +233,11 @@ int puo(node_type *node);
 void set_best_child(node_type *node);
 //job_type *new_job(node_type *n, int t);
 node_type *new_leaf(child_msg_type *msg, int ch, int mm);
-int hash(int path[], int depth);
+unsigned int hash(int path[], int depth);
 int opposite(node_type *node);
 node_type *first_child(node_type *node);
+int max_of_kids(int *a);
+int min_of_kids(int *a);
 int max_of_beta_kids(node_type *node);
 int min_of_alpha_kids(node_type *node);
 int max_of_ub_kids(node_type *node);
